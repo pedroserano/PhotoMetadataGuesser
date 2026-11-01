@@ -4,6 +4,7 @@
 #
 #   ./scripts/build-app.sh                 # release build, ad-hoc signed
 #   SIGN_IDENTITY="Developer ID Application: …" ./scripts/build-app.sh
+#   UNIVERSAL=1 ./scripts/build-app.sh   # runs on both Apple silicon and Intel Macs (for releases)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -23,9 +24,12 @@ CONFIG="${CONFIG:-release}"
 APP_NAME="Photo Date Guesser"
 APP="build/${APP_NAME}.app"
 
-echo "▸ Compiling ($CONFIG)…"
-swift build -c "$CONFIG" --product PhotoMetadataGuesser
-BIN_DIR="$(swift build -c "$CONFIG" --show-bin-path)"
+ARCH_ARGS=()
+[ "${UNIVERSAL:-0}" = "1" ] && ARCH_ARGS=(--arch arm64 --arch x86_64)
+
+echo "▸ Compiling ($CONFIG${UNIVERSAL:+, universal})…"
+swift build -c "$CONFIG" --product PhotoMetadataGuesser ${ARCH_ARGS[@]+"${ARCH_ARGS[@]}"}
+BIN_DIR="$(swift build -c "$CONFIG" ${ARCH_ARGS[@]+"${ARCH_ARGS[@]}"} --show-bin-path)"
 
 echo "▸ Assembling ${APP}…"
 rm -rf "$APP"
