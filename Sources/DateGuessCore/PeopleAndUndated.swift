@@ -4,26 +4,50 @@ import Foundation
 
 /// Turns "this person appears, looking about N years old" into a year range using their birth date.
 public enum PeopleClues {
-    /// The person exists in the photo, so it can't predate their birth.
-    public static func presence(of person: PersonInfo) -> DateEvidence {
-        DateEvidence(source: .person, summary: "\(person.name) (born \(person.birthYear)) is in this photo",
-                     yearLow: person.birthYear, yearHigh: nil, weight: 1, isHardConstraint: true)
+    /// The person exists in the photo, so it can't predate their birth. Nil without a birth year.
+    public static func presence(of person: PersonInfo, via: String = "") -> DateEvidence? {
+        guard let born = person.birthYear else { return nil }
+        return DateEvidence(source: .person, summary: "\(person.name) (born \(born)) is in this photo\(via)",
+                            yearLow: born, yearHigh: nil, weight: 1, isHardConstraint: true)
+    }
+
+    /// Photos' rough age group for a face (`ZAGETYPE`). Worked out from ~87,000 faces on photos with
+    /// trustworthy dates, following children from infancy: 1 is a baby (first year or so), 2 a young
+    /// child (about 1–5), 3 older children through adults, 5 older adults (rare before 30, the
+    /// majority later). 4 is almost never used. 3 and 5 overlap a lot, so they're weak clues.
+    /// Apple doesn't document these. The one public mapping (mac4n6.com, 2020: 1–2 "Baby / Toddler",
+    /// 3 "Child / Young Adult", 4 "Young Adult / Adult", 5 "Adult") has the same order.
+    public static func faceAgeGroup(of person: PersonInfo, type: Int) -> DateEvidence? {
+        guard let born = person.birthYear else { return nil }
+        let (lo, hi, weight, label): (Int, Int?, Double, String)
+        switch type {
+        case 1: (lo, hi, weight, label) = (0, 1, 0.75, "looks like a baby")
+        case 2: (lo, hi, weight, label) = (1, 6, 0.6, "looks like a young child")
+        case 3: (lo, hi, weight, label) = (4, nil, 0.3, "looks older than a young child")
+        case 5: (lo, hi, weight, label) = (25, nil, 0.2, "looks like an adult")
+        default: return nil
+        }
+        let range = hi.map { "\(born + lo)–\(born + $0)" } ?? "\(born + lo) or later"
+        return DateEvidence(source: .person,
+                            summary: "Photos thinks \(person.name) \(label) here (born \(born)) → \(range)",
+                            yearLow: born + lo, yearHigh: hi.map { born + $0 }, weight: weight)
     }
 
     /// Apparent age → year range. `matchConfidence` is how sure we are it's really them.
     public static func age(of person: PersonInfo, ageLow: Int, ageHigh: Int, matchConfidence: Double,
-                           userProvided: Bool = false) -> DateEvidence {
+                           userProvided: Bool = false) -> DateEvidence? {
+        guard let birthYear = person.birthYear else { return nil }
         let lo = max(0, min(ageLow, ageHigh)), hi = max(ageLow, ageHigh)
         let slack = userProvided ? 1 : 1 + (hi >= 30 ? 2 : 0)
-        let yearLo = person.birthYear + lo - slack
-        let yearHi = person.birthYear + hi + slack
+        let yearLo = birthYear + lo - slack
+        let yearHi = birthYear + hi + slack
         let ageText = lo == hi ? "about \(lo)" : "\(lo)–\(hi)"
         let weight = userProvided ? 0.85 : 0.35 + 0.45 * max(0, min(1, matchConfidence))
         let who = userProvided ? "You said \(person.name) is" : "\(person.name) looks"
         return DateEvidence(source: .person,
-                            summary: "\(who) \(ageText) years old here (born \(person.birthYear)) → \(yearLo)–\(yearHi)",
-                            yearLow: max(person.birthYear, yearLo), yearHigh: yearHi,
-                            peakYear: person.birthYear + (lo + hi) / 2, weight: weight)
+                            summary: "\(who) \(ageText) years old here (born \(birthYear)) → \(yearLo)–\(yearHi)",
+                            yearLow: max(birthYear, yearLo), yearHigh: yearHi,
+                            peakYear: birthYear + (lo + hi) / 2, weight: weight)
     }
 }
 
@@ -227,5 +251,60 @@ public enum GroupSuggester {
         guard start < end, end - start <= 6, let n = Int(String(chars[start..<end])) else { return nil }
         let prefix = String(chars[0..<start]).lowercased()
         return (prefix, n)
+    }
+}
+
+// MARK: - Matching names
+
+public enum PersonMatcher {
+    /// Finds the person a free-text name refers to ("dad (john)", "John Smith", "Grandma Rose").
+    /// Exact matches win, then a full name contained in the text, then a unique first-name match.
+    public static func match(_ text: String, in people: [PersonInfo]) -> PersonInfo? {
+        let needle = normalize(text)
+        guard !needle.isEmpty else { return nil }
+        let named = people.filter { !normalize($0.name).isEmpty }
+        if let exact = named.first(where: { normalize($0.name) == needle }) { return exact }
+        let words = Set(needle.split(separator: " ").map(String.init))
+        let contained = named.filter { p in
+            let nameWords = normalize(p.name).split(separator: " ").map(String.init)
+            return !nameWords.isEmpty && nameWords.allSatisfy(words.contains)
+        }
+        if contained.count == 1 { return contained[0] }
+        let byFirst = named.filter { p in
+            guard let first = normalize(p.name).split(separator: " ").first else { return false }
+            return words.contains(String(first))
+        }
+        return byFirst.count == 1 ? byFirst[0] : nil
+    }
+
+    public static func normalize(_ s: String) -> String {
+        let folded = s.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
+        let cleaned = folded.map { $0.isLetter || $0.isNumber ? $0 : " " }
+        return String(cleaned).split(separator: " ").joined(separator: " ")
+    }
+}
+
+// MARK: - Clues from where the photo came from
+
+public enum ProvenanceClues {
+    /// The user knows their library has no photos older than this year.
+    public static func earliestYear(_ year: Int) -> DateEvidence {
+        DateEvidence(source: .prior, summary: "You said there are no photos from before \(year)",
+                     yearLow: year, yearHigh: nil, weight: 1, isHardConstraint: true)
+    }
+
+    /// For scans and imports the library date is when the file was made, so the photo can't be newer.
+    public static func libraryDateLimit(reason: UndatedReason, libraryDate: Date?,
+                                        calendar: Calendar = .current) -> DateEvidence? {
+        guard let libraryDate else { return nil }
+        switch reason {
+        case .noCaptureDateInFile, .scannerDate, .dateRangeRule: break
+        case .missingDate, .implausibleDate, .albumRule: return nil
+        }
+        let year = calendar.component(.year, from: libraryDate)
+        guard YearBounds.isPlausible(year) else { return nil }
+        return DateEvidence(source: .libraryDate,
+                            summary: "Scanned or imported in \(year), so it was taken in \(year) or earlier",
+                            yearLow: nil, yearHigh: year, weight: 1, isHardConstraint: true)
     }
 }

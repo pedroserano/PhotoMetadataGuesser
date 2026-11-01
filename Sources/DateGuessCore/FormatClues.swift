@@ -136,3 +136,55 @@ public enum FormatClues {
         return nil
     }
 }
+
+// MARK: - Cameras the user remembers
+
+/// "I used this camera from … to …", entered by the user.
+public struct CameraPeriod: Codable, Hashable, Identifiable, Sendable {
+    /// The camera's name as the app shows it (make + model), also used to match photos.
+    public var id: String
+    public var fromYear: Int?
+    public var toYear: Int?
+
+    public init(id: String, fromYear: Int? = nil, toYear: Int? = nil) {
+        self.id = id
+        self.fromYear = fromYear
+        self.toYear = toYear
+    }
+}
+
+public enum CameraClues {
+    /// "Canon Canon PowerShot S100" → "Canon PowerShot S100" (many cameras repeat the make in the model).
+    public static func name(make: String?, model: String?) -> String? {
+        let m = (make ?? "").trimmingCharacters(in: .whitespaces)
+        let mo = (model ?? "").trimmingCharacters(in: .whitespaces)
+        if mo.isEmpty { return m.isEmpty ? nil : m }
+        if m.isEmpty || mo.lowercased().hasPrefix(m.lowercased().split(separator: " ").first.map(String.init) ?? m.lowercased()) {
+            return mo
+        }
+        return "\(m) \(mo)"
+    }
+
+    /// The camera that took this photo, unless it's a scanner (a scan's camera says nothing about when).
+    public static func camera(of info: FormatInfo) -> String? {
+        guard !UndatedDetector.looksLikeScanner(make: info.cameraMake, model: info.cameraModel, software: info.software) else { return nil }
+        return name(make: info.cameraMake, model: info.cameraModel)
+    }
+
+    public static func evidence(for info: FormatInfo, periods: [CameraPeriod]) -> DateEvidence? {
+        guard let camera = camera(of: info),
+              let period = periods.first(where: { $0.id.caseInsensitiveCompare(camera) == .orderedSame }),
+              period.fromYear != nil || period.toYear != nil else { return nil }
+        let lo = period.fromYear, hi = period.toYear
+        let range: String
+        switch (lo, hi) {
+        case let (a?, b?): range = "from \(min(a, b)) to \(max(a, b))"
+        case let (a?, nil): range = "from \(a) on"
+        case let (nil, b?): range = "until \(b)"
+        default: range = ""
+        }
+        return DateEvidence(source: .camera, summary: "You used the \(camera) \(range)",
+                            yearLow: lo.map { a in hi.map { min(a, $0) } ?? a },
+                            yearHigh: hi.map { b in lo.map { max(b, $0) } ?? b }, weight: 0.92)
+    }
+}

@@ -15,6 +15,9 @@ struct PhotoMetadataGuesserApp: App {
                 .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
                     state.saveEverything()
                 }
+                .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+                    state.appBecameActive()
+                }
         }
         .windowToolbarStyle(.unified)
         .commands { SidebarCommands() }

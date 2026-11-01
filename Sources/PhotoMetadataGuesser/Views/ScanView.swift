@@ -14,17 +14,39 @@ struct ScanView: View {
     var _newRuleEnd = State<Date>(initialValue: Date())
     private var newRuleEnd: Date { get { _newRuleEnd.wrappedValue } nonmutating set { _newRuleEnd.wrappedValue = newValue } }
 
+    var _showOptions = State<Bool>(initialValue: false)
+    private var showOptions: Bool { get { _showOptions.wrappedValue } nonmutating set { _showOptions.wrappedValue = newValue } }
+
     var body: some View {
         @Bindable var state = state
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 StepHeader(step: 1, title: "Find photos without a date",
-                           subtitle: "We’ll look through your whole library — even hundreds of thousands of photos — and set aside only the ones that don’t have a real date. Photos that already have one are skipped.",
+                           subtitle: "We look through your library for photos without a real date, like scanned prints, and guess a date for each one. Nothing changes until you apply.",
                            systemImage: "magnifyingglass")
 
                 scanCard
 
-                Card(title: "What counts as “undated”?", systemImage: "questionmark.circle") {
+                DisclosureGroup(isExpanded: _showOptions.projectedValue) {
+                    VStack(alignment: .leading, spacing: 18) {
+                        optionsCard
+                        albumsCard
+                        rulesCard
+                    }
+                    .padding(.top, 10)
+                } label: {
+                    Text("Options: what counts as undated, scan albums, scanning sessions")
+                        .font(.headline)
+                }
+            }
+            .padding(28)
+            .frame(maxWidth: 900, alignment: .leading)
+        }
+    }
+
+    private var optionsCard: some View {
+        @Bindable var state = state
+        return Card(title: "What counts as “undated”?", systemImage: "questionmark.circle") {
                     Toggle(isOn: .constant(true)) {
                         Text("Photos with no date, an impossible date, or a camera’s factory-default date (like Jan 1, 1970)")
                     }
@@ -44,13 +66,6 @@ struct ScanView: View {
                     .padding(.leading, 20)
                     Toggle("Include screenshots", isOn: $state.settings.scan.includeScreenshots)
                 }
-
-                albumsCard
-                rulesCard
-            }
-            .padding(28)
-            .frame(maxWidth: 900, alignment: .leading)
-        }
     }
 
     // MARK: Scan card
@@ -79,7 +94,8 @@ struct ScanView: View {
                         if let last = state.scan.lastScan {
                             Text("\(state.undatedSorted.count.formatted()) photos need a date")
                                 .font(.title2.weight(.semibold))
-                            Text("Checked \(state.scan.totalAssets.formatted()) photos on \(last.formatted(date: .abbreviated, time: .shortened)).")
+                            Text("Checked \(state.scan.totalAssets.formatted()) photos on \(last.formatted(date: .abbreviated, time: .shortened))."
+                                 + (state.appliedIDs.isEmpty ? "" : " \(state.appliedIDs.count.formatted()) you already dated here are skipped."))
                                 .foregroundStyle(.secondary)
                         } else {
                             Text("Ready when you are")
@@ -89,16 +105,31 @@ struct ScanView: View {
                         }
                     }
                     Spacer()
-                    Button {
-                        state.startScan()
-                    } label: {
-                        Label(state.scan.lastScan == nil ? "Scan Library" : "Scan Again", systemImage: "magnifyingglass")
-                            .padding(.horizontal, 8)
+                    if state.scan.lastScan == nil || state.appliedIDs.isEmpty {
+                        Button {
+                            state.startScan()
+                        } label: {
+                            Label(state.scan.lastScan == nil ? "Scan Library" : "Scan Again", systemImage: "magnifyingglass")
+                                .padding(.horizontal, 8)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.large)
+                    } else {
+                        Menu {
+                            Button("Scan Again, Including Photos I Dated Here") { state.startScan(includeApplied: true) }
+                        } label: {
+                            Label("Scan Again", systemImage: "magnifyingglass")
+                        } primaryAction: {
+                            state.startScan()
+                        }
+                        .menuStyle(.button)
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.large)
+                        .fixedSize()
+                        .help("Photos you already dated with this app are skipped. Use the arrow to include them.")
                     }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
                     if !state.undatedSorted.isEmpty {
-                        Button("Next: Group Photos", action: goNext)
+                        Button("See the Guesses", action: goNext)
                             .controlSize(.large)
                     }
                 }

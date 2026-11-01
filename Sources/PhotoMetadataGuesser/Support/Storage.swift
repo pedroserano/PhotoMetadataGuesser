@@ -38,6 +38,22 @@ final class JSONStore: @unchecked Sendable {
         }
     }
 
+    /// Binary property list: much smaller than JSON for raw `Data` values like image fingerprints.
+    func loadBinary<T: Decodable>(_ type: T.Type, from name: String) -> T? {
+        guard let data = try? Data(contentsOf: directory.appendingPathComponent("\(name).plist")) else { return nil }
+        return try? PropertyListDecoder().decode(T.self, from: data)
+    }
+
+    func saveBinary<T: Encodable & Sendable>(_ value: T, to name: String) {
+        let target = directory.appendingPathComponent("\(name).plist")
+        queue.async {
+            let encoder = PropertyListEncoder()
+            encoder.outputFormat = .binary
+            guard let data = try? encoder.encode(value) else { return }
+            try? data.write(to: target, options: .atomic)
+        }
+    }
+
     /// Blocks until queued writes finish (used at quit).
     func flush() { queue.sync {} }
 }

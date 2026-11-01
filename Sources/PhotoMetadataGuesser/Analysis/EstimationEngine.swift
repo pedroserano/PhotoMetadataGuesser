@@ -21,6 +21,9 @@ struct EstimationEngine {
     var people: [PersonInfo]
     var ai: AISettings
     var apiKey: String?
+    /// The user's "no photos before this year".
+    var earliestYear: Int? = nil
+    var cameras: [CameraPeriod] = []
 
     private var library: PhotoLibraryService { .shared }
 
@@ -89,7 +92,9 @@ struct EstimationEngine {
             if Task.isCancelled { break }
             var local = LocalClues.evidence(for: photo)
             var observations: [String] = []
+            var fingerprint: Data?
             if let asset = library.asset(for: photo.id), let image = await library.analysisImage(for: asset, maxEdge: edge) {
+                fingerprint = ImageAnalyzer.featurePrint(image)
                 if let stats = ImageAnalyzer.statistics(image) {
                     local += VisualClues.evidence(from: stats)
                     observations = VisualClues.observations(from: stats)
@@ -102,7 +107,8 @@ struct EstimationEngine {
                 }
             }
             analyses.append(PhotoAnalysis(assetID: photo.id, localEvidence: local, aiEvidence: [], aiError: nil,
-                                          usedAI: false, analyzedAt: Date()))
+                                          usedAI: false, analyzedAt: Date(), featurePrint: fingerprint,
+                                          localVersion: PhotoAnalysis.currentLocalVersion))
         }
 
         guard let client, !inputs.isEmpty, !Task.isCancelled else { return (analyses, AIUsage(), false) }
@@ -114,6 +120,7 @@ struct EstimationEngine {
                 if let r = results[promptID] {
                     let photo = unit.photos.first { $0.id == assetID }
                     analyses[idx].aiEvidence = AIEvidenceMapper.evidence(from: r, people: people, libraryDate: photo?.libraryDate)
+                    analyses[idx].aiPeople = r.people
                     analyses[idx].usedAI = true
                 } else {
                     analyses[idx].aiError = "Claude didn't return a result for this photo"
@@ -127,6 +134,32 @@ struct EstimationEngine {
         }
     }
 
+    /// Fingerprints only, for photos analyzed before fingerprints existed. Results come back in batches.
+    static func fingerprints(for ids: [String],
+                             progress: @escaping @Sendable (Int) async -> Void,
+                             deliver: @escaping @Sendable ([String: Data]) async -> Void) async {
+        let library = PhotoLibraryService.shared
+        var done = 0
+        for chunk in ids.chunked(into: 16) {
+            if Task.isCancelled { return }
+            let batch = await withTaskGroup(of: (String, Data?).self) { group in
+                for id in chunk {
+                    group.addTask {
+                        guard let asset = library.asset(for: id),
+                              let image = await library.analysisImage(for: asset, maxEdge: 512) else { return (id, nil) }
+                        return (id, ImageAnalyzer.featurePrint(image))
+                    }
+                }
+                var out: [String: Data] = [:]
+                for await (id, data) in group { if let data { out[id] = data } }
+                return out
+            }
+            done += chunk.count
+            await deliver(batch)
+            await progress(done)
+        }
+    }
+
     // MARK: Prompt context
 
     func promptContext(_ photo: UndatedPhoto, observations: [String]) -> String {
@@ -137,6 +170,8 @@ struct EstimationEngine {
             lines.append("Date currently in the library (often the scan/import date, NOT when it was taken): \(Self.dayFormatter.string(from: d))")
         }
         lines.append("Why it's considered undated: \(photo.reason.explanation)")
+        if let earliestYear { lines.append("The owner says none of their photos were taken before \(earliestYear).") }
+        if let e = CameraClues.evidence(for: photo.format, periods: cameras) { lines.append("The owner says: \(e.summary).") }
         let format = photo.format.promptDescription
         if !format.isEmpty { lines.append("File: \(format)") }
         if !observations.isEmpty { lines.append("On-device look: \(observations.joined(separator: ", "))") }
@@ -168,16 +203,16 @@ struct EstimationEngine {
     func referenceImages() async -> [AIReferenceImage] {
         var out: [AIReferenceImage] = []
         let undatedIDs = Set(photos.map(\.id))
-        for person in people {
+        for person in people where !person.name.trimmingCharacters(in: .whitespaces).isEmpty {
             for id in person.referenceAssetIDs.prefix(2) {
                 guard let asset = library.asset(for: id), let image = await library.analysisImage(for: asset, maxEdge: 1024) else { continue }
                 let face = ImageAnalyzer.largestFaceCrop(image)
                 guard let jpeg = ImageAnalyzer.jpegData(face, maxEdge: 512) else { continue }
-                var note = ""
-                if !undatedIDs.contains(id), let date = asset.creationDate {
+                var note = person.birthYear.map { "born \($0)" } ?? ""
+                if !undatedIDs.contains(id), let date = asset.creationDate, let born = person.birthYear {
                     let year = Calendar.current.component(.year, from: date)
-                    let age = year - person.birthYear
-                    if age >= 0 && age < 110 { note = "about \(age) years old in this photo (\(year))" }
+                    let age = year - born
+                    if age >= 0 && age < 110 { note += ", about \(age) years old in this photo (\(year))" }
                 }
                 out.append(AIReferenceImage(personName: person.name, note: note, jpegData: jpeg))
             }
@@ -215,12 +250,21 @@ enum GroupClues {
             out.append(DateEvidence(source: .groupHint, summary: "You said these are from \(season.displayName.lowercased())",
                                     season: season, seasonWeight: 1))
         }
-        for hint in group.people {
+        return out + peopleEvidence(group.people, people: people)
+    }
+
+    /// "This person is here, about N years old": works on its own, without Claude.
+    static func peopleEvidence(_ hints: [GroupPersonHint], people: [PersonInfo]) -> [DateEvidence] {
+        var out: [DateEvidence] = []
+        for hint in hints {
             guard let person = people.first(where: { $0.id == hint.personID }) else { continue }
-            out.append(PeopleClues.presence(of: person))
-            if let age = hint.approximateAge {
-                out.append(PeopleClues.age(of: person, ageLow: age, ageHigh: age, matchConfidence: 1, userProvided: true))
+            if let age = hint.approximateAge,
+               let e = PeopleClues.age(of: person, ageLow: age, ageHigh: age, matchConfidence: 1, userProvided: true) {
+                out.append(e)
+            } else if let type = hint.faceAgeType, let e = PeopleClues.faceAgeGroup(of: person, type: type) {
+                out.append(e)
             }
+            if let e = PeopleClues.presence(of: person, via: hint.fromPhotos ? " (tagged in Photos)" : "") { out.append(e) }
         }
         return out
     }

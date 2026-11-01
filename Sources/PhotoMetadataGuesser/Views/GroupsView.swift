@@ -3,7 +3,6 @@ import DateGuessCore
 
 struct GroupsView: View {
     @Environment(AppState.self) private var state
-    var goNext: () -> Void
 
     var _selectedGroupID = State<UUID?>(initialValue: nil)
     private var selectedGroupID: UUID? { get { _selectedGroupID.wrappedValue } nonmutating set { _selectedGroupID.wrappedValue = newValue } }
@@ -33,16 +32,18 @@ struct GroupsView: View {
                 .frame(width: 220)
             Divider()
             VStack(alignment: .leading, spacing: 0) {
-                VStack(alignment: .leading, spacing: 14) {
-                    StepHeader(step: 2, title: "Group photos that go together",
-                               subtitle: "Optional, but it really helps: photos from the same event or the same album are dated together, and anything you know (“Hawaii trip, summer ’78”) applies to all of them.",
-                               systemImage: "square.stack.3d.up")
-                    if let id = selectedGroupID, state.groups.contains(where: { $0.id == id }) {
-                        GroupEditor(groupID: id, onDelete: { selectedGroupID = nil })
-                    }
+                if let id = selectedGroupID, state.groups.contains(where: { $0.id == id }) {
+                    GroupEditor(groupID: id, onDelete: { selectedGroupID = nil })
+                        .padding([.horizontal, .top], 24)
+                        .padding(.bottom, 12)
+                } else {
+                    Text("Select photos below and click New Group. Anything you know about a group (“Hawaii trip, summer ’78”) applies to every photo in it.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding([.horizontal, .top], 24)
+                        .padding(.bottom, 12)
                 }
-                .padding([.horizontal, .top], 24)
-                .padding(.bottom, 12)
                 photoGrid
             }
         }
@@ -107,13 +108,6 @@ struct GroupsView: View {
                     }
                 }
             }
-        }
-        .safeAreaInset(edge: .bottom) {
-            HStack {
-                Spacer()
-                Button("Next: People", action: goNext)
-            }
-            .padding(10)
         }
     }
 
@@ -331,13 +325,10 @@ struct GroupEditor: View {
                     .lineLimit(1...3)
                 HStack(spacing: 10) {
                     Text("Years (if known):")
-                    TextField("From", value: group.yearFrom, format: .number.grouping(.never))
-                        .frame(width: 64)
+                    NumberField(title: "From", value: group.yearFrom, range: YearBounds.earliestPhotoYear...YearBounds.currentYear())
                     Text("to")
-                    TextField("To", value: group.yearTo, format: .number.grouping(.never))
-                        .frame(width: 64)
+                    NumberField(title: "To", value: group.yearTo, range: YearBounds.earliestPhotoYear...YearBounds.currentYear())
                 }
-                .textFieldStyle(.roundedBorder)
                 Picker("Season (if known)", selection: group.season) {
                     Text("Unknown").tag(Season?.none)
                     ForEach(Season.allCases) { s in
@@ -358,7 +349,7 @@ struct GroupEditor: View {
                 Spacer()
                 Menu {
                     if state.people.isEmpty {
-                        Text("Add people in the People & Birthdays step first")
+                        Text("Add people in the People tab first")
                     }
                     ForEach(state.people) { person in
                         Button(person.name) {
@@ -376,9 +367,7 @@ struct GroupEditor: View {
                     Text(state.people.first { $0.id == hint.personID }?.name ?? "Unknown person")
                     Text("about")
                         .foregroundStyle(.secondary)
-                    TextField("age", value: $hint.approximateAge, format: .number)
-                        .frame(width: 50)
-                        .textFieldStyle(.roundedBorder)
+                    NumberField(title: "age", value: $hint.approximateAge, range: 0...110, width: 50)
                     Text("years old (optional)").foregroundStyle(.secondary)
                     Spacer()
                     Button {

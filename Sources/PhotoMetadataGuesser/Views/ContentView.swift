@@ -2,16 +2,14 @@ import SwiftUI
 import DateGuessCore
 
 enum SidebarItem: String, CaseIterable, Identifiable {
-    case scan, groups, people, estimate, review, history
+    case scan, know, review, history
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
         case .scan: return "Find Undated Photos"
-        case .groups: return "Group Photos"
-        case .people: return "People & Birthdays"
-        case .estimate: return "Estimate Dates"
+        case .know: return "What You Know"
         case .review: return "Review & Apply"
         case .history: return "History"
         }
@@ -20,9 +18,7 @@ enum SidebarItem: String, CaseIterable, Identifiable {
     var icon: String {
         switch self {
         case .scan: return "magnifyingglass"
-        case .groups: return "square.stack.3d.up"
-        case .people: return "person.2"
-        case .estimate: return "sparkles"
+        case .know: return "person.2"
         case .review: return "checkmark.circle"
         case .history: return "clock.arrow.circlepath"
         }
@@ -31,10 +27,8 @@ enum SidebarItem: String, CaseIterable, Identifiable {
     var step: Int? {
         switch self {
         case .scan: return 1
-        case .groups: return 2
-        case .people: return 3
-        case .estimate: return 4
-        case .review: return 5
+        case .know: return 2
+        case .review: return 3
         case .history: return nil
         }
     }
@@ -61,6 +55,15 @@ struct ContentView: View {
                         .background(Theme.background)
                 }
                 .onChange(of: selection) { _, _ in columnVisibility = .all }
+                .sheet(isPresented: Binding(
+                    get: { state.needsLibrarySetup || state.needsContactsSetup },
+                    set: { shown in
+                        guard !shown else { return }
+                        if state.needsLibrarySetup { state.settings.skippedLibrarySetup = true }
+                        if state.needsContactsSetup { state.settings.skippedContactsSetup = true }
+                    })) {
+                    SetupView()
+                }
             } else {
                 WelcomeView()
             }
@@ -109,9 +112,7 @@ struct ContentView: View {
     private func badge(for item: SidebarItem) -> Int {
         switch item {
         case .scan: return state.undatedSorted.count
-        case .groups: return state.groups.count
-        case .people: return state.people.count
-        case .estimate: return state.pendingAnalysisIDs.count
+        case .know: return state.people.count + state.groups.count
         case .review: return state.selectedForApply.count
         case .history: return 0
         }
@@ -121,7 +122,7 @@ struct ContentView: View {
 
     /// Steps that only make sense after a scan.
     private func needsScan(_ item: SidebarItem) -> Bool {
-        state.scan.lastScan == nil && (item == .groups || item == .estimate || item == .review)
+        state.scan.lastScan == nil && item == .review
     }
 
     @ViewBuilder private var detail: some View {
@@ -135,11 +136,9 @@ struct ContentView: View {
 
     @ViewBuilder private func stepView(_ item: SidebarItem) -> some View {
         switch item {
-        case .scan: ScanView(goNext: { selection = .groups })
-        case .groups: GroupsView(goNext: { selection = .people })
-        case .people: PeopleView(goNext: { selection = .estimate })
-        case .estimate: EstimateView(goNext: { selection = .review })
-        case .review: ReviewView()
+        case .scan: ScanView(goNext: { selection = .review })
+        case .know: KnowView(goNext: { selection = .review })
+        case .review: ReviewView(goToKnow: { selection = .know })
         case .history: HistoryView()
         }
     }
@@ -250,6 +249,82 @@ struct BannerView: View {
             .shadow(color: .black.opacity(0.15), radius: 8, y: 3)
             .padding(.bottom, 18)
             .transition(.move(edge: .bottom).combined(with: .opacity))
+        }
+    }
+}
+
+/// First-run steps after Photos access: point the app at the library file once (for the names
+/// you've tagged in Photos), then allow Contacts (for birthdays). Each step can be skipped.
+struct SetupView: View {
+    @Environment(AppState.self) private var state
+
+    var body: some View {
+        Group {
+            if state.needsLibrarySetup {
+                libraryStep
+            } else {
+                contactsStep
+            }
+        }
+        .padding(24)
+        .frame(width: 520)
+    }
+
+    private func header(_ icon: String, _ title: String, _ subtitle: String) -> some View {
+        HStack(spacing: 14) {
+            Image(systemName: icon)
+                .font(.system(size: 34))
+                .foregroundStyle(Theme.accent)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title).font(.title2.weight(.semibold))
+                Text(subtitle).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var libraryStep: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            header("person.crop.rectangle.stack", "Choose your Photos library",
+                   "So the app can use the people you’ve named in Photos.")
+            Text("Photos access lets the app see your pictures and dates, but not the names of the people in them. Those live in your library file, and macOS asks you to point to it once. It’s usually in your Pictures folder, or on the drive where you keep your library. It’s only read, never changed.")
+                .fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Button("Not Now") { state.settings.skippedLibrarySetup = true }
+                Spacer()
+                Button {
+                    LibraryPicker.choose(state)
+                } label: {
+                    Text("Choose Library…").padding(.horizontal, 6)
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+            }
+            Text("You can also do this later from What You Know ▸ People ▸ Import from Photos.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var contactsStep: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            header("person.crop.circle.badge.clock", "Use birthdays from Contacts",
+                   "So you don’t have to type everyone’s birth year.")
+            Text("When Photos has linked someone to a contact card, the app reads the birthday from it and works out how old they are in each photo. Contacts are only changed if you turn that on in Settings.")
+                .fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Button("Not Now") { state.settings.skippedContactsSetup = true }
+                Spacer()
+                Button {
+                    Task { await state.requestContactsAccess() }
+                } label: {
+                    Text("Allow Contacts…").padding(.horizontal, 6)
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+            }
+            Text("You can also do this later from What You Know ▸ People ▸ Birthdays from Contacts.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
     }
 }

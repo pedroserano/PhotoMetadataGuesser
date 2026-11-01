@@ -3,6 +3,7 @@ import DateGuessCore
 
 struct ReviewView: View {
     @Environment(AppState.self) private var state
+    var goToKnow: () -> Void = {}
 
     var _filter = State<Filter>(initialValue: .toReview)
     private var filter: Filter { get { _filter.wrappedValue } nonmutating set { _filter.wrappedValue = newValue } }
@@ -16,14 +17,14 @@ struct ReviewView: View {
     private var detailID: String? { get { _detailID.wrappedValue } nonmutating set { _detailID.wrappedValue = newValue } }
     var _confirmApply = State<Bool>(initialValue: false)
     private var confirmApply: Bool { get { _confirmApply.wrappedValue } nonmutating set { _confirmApply.wrappedValue = newValue } }
+    var _confirmClaude = State<Bool>(initialValue: false)
+    private var confirmClaude: Bool { get { _confirmClaude.wrappedValue } nonmutating set { _confirmClaude.wrappedValue = newValue } }
 
     enum Filter: String, CaseIterable, Identifiable {
-        case toReview = "To review"
+        case toReview = "All"
         case selected = "Checked"
-        case high = "High confidence"
-        case medium = "Medium"
-        case low = "Low"
-        case ignored = "Keeping current date"
+        case low = "Unsure"
+        case ignored = "Hidden"
         var id: String { rawValue }
     }
 
@@ -50,8 +51,6 @@ struct ReviewView: View {
             switch filter {
             case .toReview: return !d.ignored
             case .selected: return d.selected && !d.ignored
-            case .high: return !d.ignored && level == .high
-            case .medium: return !d.ignored && level == .medium
             case .low: return !d.ignored && level == .low
             case .ignored: return d.ignored
             }
@@ -72,17 +71,21 @@ struct ReviewView: View {
         let ids = visibleIDs
         let selectedCount = state.selectedForApply.count
         VStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 14) {
-                StepHeader(step: 5, title: "Review and apply",
-                           subtitle: "Check the photos whose guesses look right. Adjust the year or season if you know better. When you click Apply, only the checked photos get their new date.",
-                           systemImage: "checkmark.circle")
+            VStack(alignment: .leading, spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Review and apply").font(.title.weight(.semibold))
+                    Text("Tick the guesses that look right, fix the year if you know better, then click Apply. Double-click a photo to see who’s in it.")
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                statusStrip
                 toolbar(ids)
             }
             .padding([.horizontal, .top], 24)
             .padding(.bottom, 12)
 
             ScrollView {
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 230, maximum: 280), spacing: 14)], spacing: 14) {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 240, maximum: 300), spacing: 14, alignment: .top)], spacing: 14) {
                     ForEach(ids, id: \.self) { id in
                         ReviewCard(assetID: id, onOpen: { detailID = id })
                     }
@@ -92,8 +95,8 @@ struct ReviewView: View {
             }
             .overlay {
                 if state.estimates.isEmpty {
-                    ContentUnavailableView("Nothing to review yet", systemImage: "sparkles",
-                                           description: Text("Scan your library and estimate dates first."))
+                    ContentUnavailableView(state.isEstimating ? "Guessing dates…" : "Nothing to review yet", systemImage: "sparkles",
+                                           description: Text(state.isEstimating ? "The first guesses show up here in a moment." : "Scan your library first."))
                 } else if ids.isEmpty {
                     ContentUnavailableView("No photos match", systemImage: "line.3.horizontal.decrease.circle",
                                            description: Text("Try a different filter."))
@@ -104,11 +107,64 @@ struct ReviewView: View {
         .sheet(item: Binding(get: { detailID.map(IdentifiedString.init) }, set: { detailID = $0?.id })) { item in
             PhotoDetailSheet(assetID: item.id)
         }
+        .confirmationDialog("Ask Claude about \(state.claudePendingIDs.count.formatted()) photos?", isPresented: _confirmClaude.projectedValue) {
+            Button("Ask Claude") { state.startEstimation(ids: state.claudePendingIDs, useClaude: true) }
+        } message: {
+            Text("Estimated cost: about \(claudeCost.formatted(.currency(code: "USD"))) with \(AIModelOption.option(for: state.settings.ai.model).name). A reduced-size copy of each photo, its filename and albums, your group notes, and your people’s names and reference photos are sent to Anthropic.")
+        }
         .alert("Apply \(selectedCount.formatted()) new dates?", isPresented: _confirmApply.projectedValue) {
             Button("Apply Dates") { state.applySelected() }
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("Photos will update each photo’s date the same way Image ▸ Adjust Date and Time does. The photos themselves aren’t replaced, and their other details (places, people, albums, edits) stay the same. You can undo this from History.")
+        }
+    }
+
+    private var claudeCost: Double {
+        let refs = state.people.reduce(0) { $0 + min(2, $1.referenceAssetIDs.count) }
+        return state.settings.ai.estimatedCost(photoCount: state.claudePendingIDs.count, referenceImages: refs)
+    }
+
+    /// What's happening now, and the one or two things that would improve the guesses.
+    @ViewBuilder private var statusStrip: some View {
+        if state.isEstimating, let p = state.estimationProgress {
+            HStack(spacing: 12) {
+                ProgressView(value: p.fraction).frame(maxWidth: 200)
+                Text("\(p.phase) \(p.done.formatted()) of \(p.total.formatted())")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+                Button("Stop") { state.cancelEstimation() }
+            }
+        } else {
+            let pending = state.claudePendingIDs.count
+            HStack(spacing: 12) {
+                if state.people.isEmpty {
+                    Button {
+                        goToKnow()
+                    } label: {
+                        Label("Add People & Birthdays", systemImage: "person.badge.plus")
+                    }
+                }
+                if pending > 0 {
+                    if state.canUseClaude {
+                        Button {
+                            confirmClaude = true
+                        } label: {
+                            Label("Ask Claude to Look Closer (\(pending.formatted()))", systemImage: "sparkles")
+                        }
+                        .help("Claude looks at clothes, cars, hairstyles, printed dates and the people you added.")
+                    } else {
+                        SettingsLink {
+                            Label("Get Better Guesses with Claude", systemImage: "sparkles")
+                        }
+                        .help("Add an Anthropic API key in Settings so Claude can look at clothes, cars, printed dates and faces.")
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+            .controlSize(.small)
         }
     }
 
@@ -139,14 +195,21 @@ struct ReviewView: View {
         Picker("Show", selection: _filter.projectedValue) {
             ForEach(Filter.allCases) { Text($0.rawValue).tag($0) }
         }
+        .pickerStyle(.segmented)
+        .labelsHidden()
         .fixedSize()
-        Picker("Group", selection: _groupFilter.projectedValue) {
-            Text("All photos").tag(UUID?.none)
-            ForEach(state.groups) { g in Text(g.name).tag(UUID?.some(g.id)) }
-        }
-        .frame(maxWidth: 200)
-        Picker("Sort", selection: _sort.projectedValue) {
-            ForEach(Sort.allCases) { Text($0.rawValue).tag($0) }
+        Menu {
+            Picker("Sort", selection: _sort.projectedValue) {
+                ForEach(Sort.allCases) { Text($0.rawValue).tag($0) }
+            }
+            if !state.groups.isEmpty {
+                Picker("Group", selection: _groupFilter.projectedValue) {
+                    Text("All photos").tag(UUID?.none)
+                    ForEach(state.groups) { g in Text(g.name).tag(UUID?.some(g.id)) }
+                }
+            }
+        } label: {
+            Label("Sort", systemImage: "arrow.up.arrow.down")
         }
         .fixedSize()
     }
@@ -218,8 +281,9 @@ struct ReviewCard: View {
             let decision = state.decision(assetID)
             let overridden = decision.overrideYear != nil || decision.overrideSeason != nil
             VStack(alignment: .leading, spacing: 8) {
-                AssetThumbnail(assetID: assetID, side: 250, height: 180)
-                    .frame(maxWidth: .infinity)
+                AssetThumbnail(assetID: assetID, side: .infinity, height: 180)
+                    // Double-click only on the picture itself, so it doesn't delay clicks on the checkbox.
+                    .onTapGesture(count: 2, perform: onOpen)
                     .overlay(alignment: .topLeading) {
                         Toggle("", isOn: Binding(get: { decision.selected }, set: { state.setSelected(assetID, $0) }))
                             .toggleStyle(.checkbox)
@@ -239,7 +303,6 @@ struct ReviewCard: View {
                                 .padding(8)
                         }
                     }
-                    .onTapGesture(count: 2, perform: onOpen)
 
                 HStack(spacing: 6) {
                     SeasonIcon(season: estimate.season)
@@ -265,7 +328,7 @@ struct ReviewCard: View {
                     Stepper(value: Binding(
                         get: { estimate.year },
                         set: { state.setOverride(assetID, year: $0, season: decision.overrideSeason) }),
-                        in: YearBounds.earliestPhotoYear...YearBounds.currentYear()) {
+                        in: state.lowestYear...YearBounds.currentYear()) {
                         Text(String(estimate.year)).monospacedDigit()
                     }
                     .fixedSize()
@@ -302,6 +365,7 @@ struct ReviewCard: View {
                 }
                 .controlSize(.small)
             }
+            .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
             .padding(10)
             .background(
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
@@ -314,7 +378,8 @@ struct ReviewCard: View {
             )
             .opacity(decision.ignored ? 0.55 : 1)
             .contextMenu {
-                Button("Show Details") { onOpen() }
+                Button("Details & Who’s in It…") { onOpen() }
+                Button("Show in Photos") { Task { await state.showInPhotos(assetID) } }
                 if decision.ignored {
                     Button("Review This Photo Again") { state.setIgnored(assetID, false) }
                 } else {
@@ -341,7 +406,7 @@ struct PhotoDetailSheet: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 20) {
-            AssetPreview(assetID: assetID, maxSide: 520)
+            FacePreview(assetID: assetID, maxSide: 520)
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
                     if let estimate = state.effectiveEstimate(assetID), let computed = state.estimates[assetID] {
@@ -366,6 +431,9 @@ struct PhotoDetailSheet: View {
                         Label(err, systemImage: "exclamationmark.triangle").foregroundStyle(.orange).font(.callout)
                     }
                     Divider()
+                    PhotoPeopleEditor(assetID: assetID)
+                    SameEventStrip(assetID: assetID)
+                    Divider()
                     EvidenceList(evidence: state.estimates[assetID]?.evidence ?? [])
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -377,6 +445,122 @@ struct PhotoDetailSheet: View {
             Button("Done") { dismiss() }
                 .keyboardShortcut(.defaultAction)
                 .padding(16)
+        }
+    }
+}
+
+/// Who's in this photo according to Photos' name tags, and how old they look. Names are added in
+/// Photos itself; here you can fill in a missing birth year or an age.
+struct PhotoPeopleEditor: View {
+    @Environment(AppState.self) private var state
+    var assetID: String
+
+    var body: some View {
+        let hints = state.people(in: assetID)
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Who’s in this photo?").font(.headline)
+                Spacer()
+                ShowInPhotosButton(assetID: assetID)
+            }
+            if hints.isEmpty {
+                Text("Nobody here is named in Photos yet. Click Show in Photos and name them there; they show up here when you come back. Their birth year, and how old they look, date the photo.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            ForEach(hints) { hint in
+                if let person = state.people.first(where: { $0.id == hint.personID }) {
+                    row(person, hint, hints)
+                }
+            }
+        }
+    }
+
+    private func row(_ person: PersonInfo, _ hint: GroupPersonHint, _ hints: [GroupPersonHint]) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "person.crop.circle.badge.checkmark")
+                .foregroundStyle(Theme.accent)
+            Text(person.name.isEmpty ? "Unnamed" : person.name).fontWeight(.medium)
+            if person.birthYear == nil {
+                Text("born").foregroundStyle(.secondary)
+                NumberField(title: "year", value: birthYear(person.id), range: 1850...YearBounds.currentYear(), width: 60)
+                    .help("Needed before this person can date photos")
+            } else {
+                Text("looks about").foregroundStyle(.secondary)
+                NumberField(title: "age", value: Binding(
+                    get: { hint.approximateAge },
+                    set: { age in
+                        state.setPhotoPeople(assetID, hints.map { h in
+                            var h = h
+                            if h.personID == hint.personID { h.approximateAge = age }
+                            return h
+                        })
+                    }), range: 0...110, width: 50)
+                Text("years old").foregroundStyle(.secondary)
+            }
+            Spacer()
+            if !hint.fromPhotos {
+                // Added by hand in an earlier version of the app.
+                Button {
+                    state.setPhotoPeople(assetID, hints.filter { $0.personID != hint.personID })
+                } label: {
+                    Image(systemName: "minus.circle")
+                }
+                .buttonStyle(.borderless)
+                .help("Remove from this photo (wasn’t tagged in Photos)")
+            }
+        }
+    }
+
+    private func birthYear(_ id: UUID) -> Binding<Int?> {
+        Binding(
+            get: { state.people.first { $0.id == id }?.birthYear },
+            set: { year in state.updateBirthday(id) { $0.birthYear = year } })
+    }
+}
+
+/// Undated photos that look like they're from the same event, with a way to lock them together.
+struct SameEventStrip: View {
+    @Environment(AppState.self) private var state
+    var assetID: String
+
+    var body: some View {
+        let matches = state.estimates[assetID]?.matches ?? []
+        let group = state.groupFor(assetID)
+        if !matches.isEmpty {
+            Divider()
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Looks like the same event").font(.headline)
+                Text("Similar scene, clothes or people, so their dates are kept close together.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ForEach(matches, id: \.self) { id in
+                            VStack(spacing: 2) {
+                                AssetThumbnail(assetID: id, side: 72, cornerRadius: 6)
+                                Text(state.effectiveEstimate(id)?.displayString ?? "")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+                            .frame(width: 72)
+                        }
+                    }
+                }
+                if group?.kind != .sameEvent {
+                    Button {
+                        let ids = [assetID] + matches
+                        let g = state.createGroup(name: "Same event (\(ids.count) photos)", assetIDs: ids, kind: .sameEvent)
+                        state.banner = "Grouped \(ids.count) photos as one event: they’ll all get the same date. Rename the group under What You Know ▸ Groups."
+                        _ = g
+                    } label: {
+                        Label("These Are All the Same Event", systemImage: "square.stack.3d.up")
+                    }
+                    .help("Gives all of them one shared date")
+                }
+            }
         }
     }
 }

@@ -13,7 +13,9 @@ struct SettingsView: View {
         @Bindable var state = state
         Form {
             Section("Claude visual analysis") {
-                Toggle("Use Claude to analyze photos", isOn: $state.settings.ai.enabled)
+                Text("Optional. With a key, Review & Apply shows an “Ask Claude to Look Closer” button. Nothing is sent until you click it.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 HStack {
                     SecureField("Anthropic API key", text: _keyDraft.projectedValue, prompt: Text(state.hasAPIKey ? "Saved in your Keychain" : "sk-ant-…"))
                     Button("Save") {
@@ -49,7 +51,29 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
+            Section("People") {
+                Toggle("Save birthdays I enter to the person’s Contacts card", isOn: Binding(
+                    get: { state.settings.writeBirthdaysToContacts == true },
+                    set: { state.settings.writeBirthdaysToContacts = $0 ? true : nil }))
+                Text("Only for people Photos has linked to a contact. The year you type replaces the card’s year; the card’s month and day are kept unless you enter them. Contacts needs a month and day to store a birthday.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("Dates") {
+                HStack {
+                    Text("No photos before")
+                    NumberField(title: "Any year", value: Binding(
+                        get: { state.settings.earliestYear },
+                        set: { state.settings.earliestYear = $0 }),
+                        range: YearBounds.earliestPhotoYear...YearBounds.currentYear(), width: 80)
+                    if state.settings.earliestYear != nil {
+                        Button("Clear") { state.settings.earliestYear = nil }
+                    }
+                }
+                Text("If you know your oldest photo is from, say, 1940, enter that year and nothing will be guessed earlier. Leave it empty if you’re not sure.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 Toggle("Use the exact month when a clear date or holiday is found", isOn: $state.settings.allowExactMonth)
                 Text("Otherwise each guess uses the season’s month: January (winter), March (spring), June (summer) or September (fall). Dates are set to noon on the 1st (or the exact day, when a full date is found).")
                     .font(.caption)

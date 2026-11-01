@@ -1,153 +1,325 @@
+import AppKit
 import PhotosUI
 import SwiftUI
+import UniformTypeIdentifiers
 import DateGuessCore
 
+/// One list of everyone, edited in place. The people who appear in the most undated photos come
+/// first, so filling in the top few birth years helps the most.
 struct PeopleView: View {
     @Environment(AppState.self) private var state
-    var goNext: () -> Void
-    var _selectedID = State<UUID?>(initialValue: nil)
-    private var selectedID: UUID? { get { _selectedID.wrappedValue } nonmutating set { _selectedID.wrappedValue = newValue } }
+    var _search = State<String>(initialValue: "")
+    private var search: String { get { _search.wrappedValue } nonmutating set { _search.wrappedValue = newValue } }
+    var _onlyMissing = State<Bool>(initialValue: false)
+    private var onlyMissing: Bool { get { _onlyMissing.wrappedValue } nonmutating set { _onlyMissing.wrappedValue = newValue } }
+
+    struct Counts { var tagged = 0; var undated = 0 }
 
     var body: some View {
-        HStack(spacing: 0) {
-            List(selection: _selectedID.projectedValue) {
-                Section("People") {
-                    if state.people.isEmpty {
-                        Text("Nobody yet — add the people who show up most in your old photos.")
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                    }
-                    ForEach(state.people) { person in
-                        HStack(spacing: 10) {
-                            if let ref = person.referenceAssetIDs.first {
-                                AssetThumbnail(assetID: ref, side: 30, cornerRadius: 15)
-                            } else {
-                                Image(systemName: "person.crop.circle.fill")
-                                    .font(.title)
-                                    .foregroundStyle(Theme.blush)
-                            }
-                            VStack(alignment: .leading) {
-                                Text(person.name.isEmpty ? "Unnamed" : person.name)
-                                Text("Born \(String(person.birthYear))").font(.caption).foregroundStyle(.secondary)
-                            }
-                        }
-                        .tag(person.id)
-                    }
-                }
-            }
-            .frame(width: 260)
-            .safeAreaInset(edge: .bottom) {
-                HStack {
-                    Button {
-                        let p = PersonInfo(name: "", birthYear: 1960)
-                        state.people.append(p)
-                        selectedID = p.id
-                    } label: {
-                        Label("Add Person", systemImage: "person.badge.plus")
-                    }
-                    Spacer()
-                    Button("Next: Estimate", action: goNext)
-                }
-                .padding(10)
-            }
+        let counts = personCounts
+        let rows = visiblePeople(counts)
+        VStack(alignment: .leading, spacing: 0) {
+            toolbar
+                .padding(.horizontal, 20)
+                .padding(.vertical, 12)
+            if state.taggedPeople.isEmpty { importCard.padding(.horizontal, 20).padding(.bottom, 12) }
             Divider()
-            ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    StepHeader(step: 3, title: "People and birthdays",
-                               subtitle: "Optional. Tell us who appears in your photos and when they were born. When we spot them, their age in the picture tells us the year — the way you’d say “Dad looks about ten here, so it’s 1962.”",
-                               systemImage: "person.2")
-                    if let id = selectedID, state.people.contains(where: { $0.id == id }) {
-                        PersonEditor(personID: id, onDelete: { selectedID = nil })
-                    } else {
-                        Card(title: "How people help", systemImage: "lightbulb") {
-                            Text("• With Claude visual analysis on, your reference photos are used to recognize each person and judge their age in every photo.")
-                            Text("• In Group Photos, you can say who’s in a group and roughly how old they are — that works even without Claude.")
-                            Text("• Someone can’t appear in a photo taken before they were born, so their birth year is a firm lower limit.")
+            if state.people.isEmpty {
+                ContentUnavailableView("No people yet", systemImage: "person.2",
+                                       description: Text("Name people in Photos, then import them here."))
+            } else {
+                summary(counts)
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 8)
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(rows) { person in
+                            PersonRow(personID: person.id, counts: counts[person.id] ?? Counts())
+                            Divider().padding(.leading, 64)
                         }
-                        .font(.callout)
+                    }
+                    .padding(.bottom, 40)
+                }
+                .overlay {
+                    if rows.isEmpty {
+                        ContentUnavailableView.search(text: search)
                     }
                 }
-                .padding(28)
-                .frame(maxWidth: 860, alignment: .leading)
             }
         }
     }
+
+    private var toolbar: some View {
+        HStack(spacing: 10) {
+            TextField("Search people", text: _search.projectedValue)
+                .textFieldStyle(.roundedBorder)
+                .frame(maxWidth: 220)
+            Toggle("Missing birth year", isOn: _onlyMissing.projectedValue)
+                .toggleStyle(.checkbox)
+            Spacer(minLength: 8)
+            if canAskContacts {
+                Button {
+                    Task { await state.fillBirthdaysFromContacts() }
+                } label: {
+                    Label("Birthdays from Contacts", systemImage: "person.crop.circle.badge.clock")
+                }
+                .help("Fill in missing birth years from the contact cards your Photos people are linked to")
+            }
+            Menu {
+                Button("Choose a Different Library…") { chooseLibrary() }
+            } label: {
+                Label(state.taggedPeople.isEmpty ? "Import from Photos" : "Update from Photos",
+                      systemImage: "person.crop.rectangle.stack")
+            } primaryAction: {
+                importPeople()
+            }
+            .fixedSize()
+            .disabled(state.isImportingPeople)
+        }
+    }
+
+    private var canAskContacts: Bool {
+        let linked = Set(state.taggedPeople.filter { $0.contactID != nil || $0.contactMatch != nil }.map(\.id))
+        return state.people.contains { $0.birthYear == nil && $0.photosPersonID.map(linked.contains) == true }
+    }
+
+    private var importCard: some View {
+        Card {
+            HStack(alignment: .center, spacing: 14) {
+                Image(systemName: "person.crop.rectangle.stack")
+                    .font(.system(size: 30))
+                    .foregroundStyle(Theme.accent)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Already named people in Photos?").font(.headline)
+                    Text("Bring them in with the photos they’re tagged in. Then add a birth year, and every tagged photo of them gets a “not before they were born” limit.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 8)
+                if state.isImportingPeople {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Button("Import from Photos") { importPeople() }
+                        .buttonStyle(.borderedProminent)
+                }
+            }
+        }
+    }
+
+    private func summary(_ counts: [UUID: Counts]) -> some View {
+        let withYear = state.people.filter { $0.birthYear != nil }.count
+        let waiting = state.people.filter { $0.birthYear == nil }.reduce(0) { $0 + (counts[$1.id]?.undated ?? 0) }
+        return HStack(spacing: 6) {
+            Text("\(state.people.count) people · \(withYear) with a birth year")
+            if waiting > 0 {
+                Text("· adding the missing ones would help with up to \(waiting.formatted()) undated photos")
+                    .foregroundStyle(.orange)
+            }
+            Spacer()
+        }
+        .font(.callout)
+        .foregroundStyle(.secondary)
+        .lineLimit(1)
+    }
+
+    /// Tagged and undated photo counts per person (tags from Photos plus photos the user marked).
+    private var personCounts: [UUID: Counts] {
+        var out: [UUID: Counts] = [:]
+        let tagged = state.taggedAssetsByPerson
+        for (id, assets) in tagged {
+            out[id] = Counts(tagged: assets.count, undated: assets.filter { state.scan.undated[$0] != nil }.count)
+        }
+        for (asset, hints) in state.photoPeople where state.scan.undated[asset] != nil {
+            for h in hints where !(tagged[h.personID]?.contains(asset) ?? false) {
+                out[h.personID, default: Counts()].undated += 1
+                out[h.personID, default: Counts()].tagged += 1
+            }
+        }
+        return out
+    }
+
+    private func visiblePeople(_ counts: [UUID: Counts]) -> [PersonInfo] {
+        state.people
+            .filter { p in
+                (search.isEmpty || p.name.localizedCaseInsensitiveContains(search)) && (!onlyMissing || p.birthYear == nil)
+            }
+            .sorted { a, b in
+                let ua = counts[a.id]?.undated ?? 0, ub = counts[b.id]?.undated ?? 0
+                if ua != ub { return ua > ub }
+                return a.name.localizedCaseInsensitiveCompare(b.name) == .orderedAscending
+            }
+    }
+
+    /// Uses the library chosen before; asks only the first time (or if it moved).
+    private func importPeople() {
+        if let url = state.savedLibraryURL, FileManager.default.fileExists(atPath: url.path) {
+            state.importTaggedPeople(from: url)
+        } else {
+            chooseLibrary()
+        }
+    }
+
+    private func chooseLibrary() { LibraryPicker.choose(state) }
 }
 
-struct PersonEditor: View {
+/// Asks for the Photos library file, which the sandbox requires once before the app may read names
+/// from it. The choice is remembered.
+@MainActor
+enum LibraryPicker {
+    static func choose(_ state: AppState) {
+        let panel = NSOpenPanel()
+        panel.message = "Choose your Photos library (the file ending in “.photoslibrary”). You only do this once; it’s only read, never changed."
+        panel.prompt = "Use This Library"
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.treatsFilePackagesAsDirectories = false
+        if let type = UTType("com.apple.photos.library") { panel.allowedContentTypes = [type] }
+        panel.directoryURL = FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask).first
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        state.importTaggedPeople(from: url)
+    }
+}
+
+/// One person, editable in place: name, birth year and month, and how much they're helping.
+struct PersonRow: View {
     @Environment(AppState.self) private var state
     var personID: UUID
-    var onDelete: () -> Void
-    var _pickerItems = State<[PhotosPickerItem]>(initialValue: [])
-    private var pickerItems: [PhotosPickerItem] { get { _pickerItems.wrappedValue } nonmutating set { _pickerItems.wrappedValue = newValue } }
+    var counts: PeopleView.Counts
+    var _showRefs = State<Bool>(initialValue: false)
+    private var showRefs: Bool { get { _showRefs.wrappedValue } nonmutating set { _showRefs.wrappedValue = newValue } }
 
-    private var personBinding: Binding<PersonInfo>? {
+    private var person: Binding<PersonInfo>? {
         guard let current = state.people.first(where: { $0.id == personID }) else { return nil }
         let state = self.state, id = personID
         return Binding(
             get: { state.people.first { $0.id == id } ?? current },
             set: { new in
-                if let i = state.people.firstIndex(where: { $0.id == id }) { state.people[i] = new }
+                if let i = state.people.firstIndex(where: { $0.id == id }), state.people[i] != new { state.people[i] = new }
             })
     }
 
     var body: some View {
-        if let person = personBinding {
-            Card {
-                HStack {
-                    TextField("Name", text: person.name)
-                        .font(.title2.weight(.semibold))
-                        .textFieldStyle(.plain)
-                    Spacer()
-                    Button(role: .destructive) {
-                        onDelete()
-                        state.people.removeAll { $0.id == personID }
-                        for i in state.groups.indices { state.groups[i].people.removeAll { $0.personID == personID } }
-                    } label: {
-                        Label("Remove", systemImage: "trash")
+        if let person {
+            HStack(spacing: 12) {
+                Button { showRefs = true } label: { avatar(person.wrappedValue) }
+                    .buttonStyle(.plain)
+                    .help("Reference photos for Claude")
+                    .popover(isPresented: _showRefs.projectedValue, arrowEdge: .trailing) {
+                        ReferencePhotosEditor(personID: personID).padding(16).frame(width: 300)
                     }
-                    .buttonStyle(.borderless)
-                }
-                HStack(spacing: 12) {
-                    Text("Born in")
-                    TextField("Year", value: person.birthYear, format: .number.grouping(.never))
-                        .frame(width: 80)
-                        .textFieldStyle(.roundedBorder)
-                    Picker("Month", selection: person.birthMonth) {
-                        Text("Month unknown").tag(Int?.none)
-                        ForEach(1...12, id: \.self) { m in
-                            Text(DateEstimate.monthNames[m - 1]).tag(Int?.some(m))
-                        }
+                VStack(alignment: .leading, spacing: 2) {
+                    if person.wrappedValue.photosPersonID == nil {
+                        // Added by hand in an earlier version of the app.
+                        TextField("Name", text: person.name, prompt: Text("Name"))
+                            .textFieldStyle(.plain)
+                            .font(.body.weight(.medium))
+                    } else {
+                        Text(person.wrappedValue.name)
+                            .font(.body.weight(.medium))
+                            .help("Rename in Photos; the new name shows up here when you come back")
                     }
-                    .frame(width: 220)
+                    Text(detail(person.wrappedValue))
+                        .font(.caption)
+                        .foregroundStyle(person.wrappedValue.birthYear == nil && counts.undated > 0 ? .orange : .secondary)
+                        .lineLimit(1)
                 }
-                TextField("Notes for yourself (optional)", text: person.notes)
-                    .textFieldStyle(.roundedBorder)
+                .frame(minWidth: 160, maxWidth: .infinity, alignment: .leading)
+                Text("Born").foregroundStyle(.secondary)
+                NumberField(title: "Year", value: Binding(
+                    get: { person.wrappedValue.birthYear },
+                    set: { year in state.updateBirthday(personID) { $0.birthYear = year } }),
+                    range: 1850...YearBounds.currentYear(), width: 64)
+                    .help(person.wrappedValue.birthdayFromContacts == true ? "From their Contacts card" : "")
+                Picker("Month", selection: Binding(
+                    get: { person.wrappedValue.birthMonth },
+                    set: { month in state.updateBirthday(personID) { $0.birthMonth = month; if month == nil { $0.birthDay = nil } } })) {
+                    Text("Month?").tag(Int?.none)
+                    ForEach(1...12, id: \.self) { m in
+                        Text(DateEstimate.monthNames[m - 1]).tag(Int?.some(m))
+                    }
+                }
+                .labelsHidden()
+                .frame(width: 110)
+                Picker("Day", selection: Binding(
+                    get: { person.wrappedValue.birthDay },
+                    set: { day in state.updateBirthday(personID) { $0.birthDay = day } })) {
+                    Text("Day?").tag(Int?.none)
+                    ForEach(1...31, id: \.self) { d in Text("\(d)").tag(Int?.some(d)) }
+                }
+                .labelsHidden()
+                .frame(width: 70)
+                .disabled(person.wrappedValue.birthMonth == nil)
+                Button(role: .destructive) {
+                    state.removePerson(personID)
+                } label: {
+                    Image(systemName: "trash")
+                }
+                .buttonStyle(.borderless)
+                .help(person.wrappedValue.photosPersonID == nil ? "Remove" : "Remove (Update from Photos brings them back)")
             }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 8)
+        }
+    }
 
-            Card(title: "Reference photos", systemImage: "person.crop.square") {
-                Text("Pick one or two photos where \(person.wrappedValue.name.isEmpty ? "this person" : person.wrappedValue.name)’s face is clear. Photos that already have a correct date are best — they show what they looked like at a known age.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                HStack(spacing: 12) {
-                    ForEach(person.wrappedValue.referenceAssetIDs, id: \.self) { id in
-                        AssetThumbnail(assetID: id, side: 110)
-                            .overlay(alignment: .topTrailing) {
-                                Button {
-                                    person.wrappedValue.referenceAssetIDs.removeAll { $0 == id }
-                                } label: {
-                                    Image(systemName: "xmark.circle.fill")
-                                        .font(.title3)
-                                        .foregroundStyle(.white, .black.opacity(0.5))
-                                }
-                                .buttonStyle(.plain)
-                                .padding(4)
+    private func avatar(_ p: PersonInfo) -> some View {
+        Group {
+            if let ref = p.referenceAssetIDs.first {
+                AssetThumbnail(assetID: ref, side: 36, cornerRadius: 18)
+            } else {
+                Image(systemName: "person.crop.circle.fill")
+                    .font(.system(size: 32))
+                    .foregroundStyle(Theme.blush)
+            }
+        }
+        .frame(width: 36, height: 36)
+    }
+
+    private func detail(_ p: PersonInfo) -> String {
+        var parts: [String] = []
+        if p.birthdayFromContacts == true { parts.append("birthday from Contacts") }
+        if p.photosPersonID != nil { parts.append("in \(counts.tagged.formatted()) photos") }
+        if counts.undated > 0 { parts.append("\(counts.undated.formatted()) undated") }
+        if p.birthYear == nil && counts.undated > 0 { parts.append("add a birth year to use") }
+        if parts.isEmpty { return p.photosPersonID == nil ? "Not in Photos: name them there to link their photos" : "No undated photos" }
+        return parts.joined(separator: " · ")
+    }
+}
+
+/// Up to two clear photos of someone's face, so Claude can recognize them.
+struct ReferencePhotosEditor: View {
+    @Environment(AppState.self) private var state
+    var personID: UUID
+    var _pickerItems = State<[PhotosPickerItem]>(initialValue: [])
+    private var pickerItems: [PhotosPickerItem] { get { _pickerItems.wrappedValue } nonmutating set { _pickerItems.wrappedValue = newValue } }
+
+    var body: some View {
+        let refs = state.people.first { $0.id == personID }?.referenceAssetIDs ?? []
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Reference photos").font(.headline)
+            Text("Clear photos of their face, ideally with a correct date. Claude uses them to spot this person. People imported from Photos get two automatically.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 10) {
+                ForEach(refs, id: \.self) { id in
+                    AssetThumbnail(assetID: id, side: 110)
+                        .overlay(alignment: .topTrailing) {
+                            Button { update { $0.referenceAssetIDs.removeAll { $0 == id } } } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .font(.title3)
+                                    .foregroundStyle(.white, .black.opacity(0.5))
                             }
-                    }
-                    PhotosPicker(selection: _pickerItems.projectedValue, maxSelectionCount: 2, matching: .images, photoLibrary: .shared()) {
+                            .buttonStyle(.plain)
+                            .padding(4)
+                        }
+                }
+                if refs.count < 2 {
+                    PhotosPicker(selection: _pickerItems.projectedValue, maxSelectionCount: 2 - refs.count,
+                                 matching: .images, photoLibrary: .shared()) {
                         VStack(spacing: 6) {
-                            Image(systemName: "plus")
-                                .font(.title)
+                            Image(systemName: "plus").font(.title)
                             Text("Add")
                         }
                         .frame(width: 110, height: 110)
@@ -155,21 +327,25 @@ struct PersonEditor: View {
                     }
                     .buttonStyle(.plain)
                 }
-                .onChange(of: pickerItems) { _, items in
-                    let ids = items.compactMap(\.itemIdentifier)
-                    guard !ids.isEmpty else { return }
-                    var refs = person.wrappedValue.referenceAssetIDs
-                    for id in ids where !refs.contains(id) { refs.append(id) }
-                    person.wrappedValue.referenceAssetIDs = refs
-                    pickerItems = []
+            }
+            .onChange(of: pickerItems) { _, items in
+                guard !items.isEmpty else { return }
+                let ids = items.compactMap(\.itemIdentifier)
+                pickerItems = []
+                guard !ids.isEmpty else {
+                    state.banner = "Couldn’t add that photo. Check that Photo Date Guesser has full access in System Settings ▸ Privacy & Security ▸ Photos."
+                    return
                 }
-                if !state.settings.ai.enabled {
-                    Label("Reference photos are only used when Claude visual analysis is turned on (Settings). Birth years still help through your groups.",
-                          systemImage: "info.circle")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                update { p in
+                    for id in ids where !p.referenceAssetIDs.contains(id) { p.referenceAssetIDs.append(id) }
+                    p.referenceAssetIDs = Array(p.referenceAssetIDs.prefix(2))
                 }
             }
         }
+    }
+
+    private func update(_ change: (inout PersonInfo) -> Void) {
+        guard let i = state.people.firstIndex(where: { $0.id == personID }) else { return }
+        change(&state.people[i])
     }
 }

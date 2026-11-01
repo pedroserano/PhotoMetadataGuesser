@@ -269,20 +269,28 @@ public struct DateEstimate: Codable, Hashable, Sendable {
 public struct PersonInfo: Codable, Hashable, Identifiable, Sendable {
     public var id: UUID
     public var name: String
-    public var birthYear: Int
+    /// Nil until the user enters it (e.g. for people imported from Photos). Without it the person
+    /// can still be recognized but can't date anything.
+    public var birthYear: Int?
     public var birthMonth: Int?
+    public var birthDay: Int?
     /// PhotoKit local identifiers of photos that clearly show this person.
     public var referenceAssetIDs: [String]
     public var notes: String
+    /// The person's identifier in the Photos library, when they were imported from its People album.
+    public var photosPersonID: String?
+    /// The birthday was filled in from their Contacts card (shown so it's clear where it came from).
+    public var birthdayFromContacts: Bool?
 
-    public init(id: UUID = UUID(), name: String, birthYear: Int, birthMonth: Int? = nil,
-                referenceAssetIDs: [String] = [], notes: String = "") {
+    public init(id: UUID = UUID(), name: String, birthYear: Int?, birthMonth: Int? = nil,
+                referenceAssetIDs: [String] = [], notes: String = "", photosPersonID: String? = nil) {
         self.id = id
         self.name = name
         self.birthYear = birthYear
         self.birthMonth = birthMonth
         self.referenceAssetIDs = referenceAssetIDs
         self.notes = notes
+        self.photosPersonID = photosPersonID
     }
 }
 
@@ -307,11 +315,19 @@ public struct GroupPersonHint: Codable, Hashable, Identifiable, Sendable {
     public var id: UUID
     public var personID: UUID
     public var approximateAge: Int?
+    /// Comes from a face tag in the Photos library rather than from the user here.
+    public var fromPhotos: Bool { _fromPhotos ?? false }
+    private var _fromPhotos: Bool?
+    /// Photos' rough age group for this person's face in the photo (see `PeopleClues.faceAgeGroup`).
+    public var faceAgeType: Int?
 
-    public init(id: UUID = UUID(), personID: UUID, approximateAge: Int? = nil) {
+    public init(id: UUID = UUID(), personID: UUID, approximateAge: Int? = nil, fromPhotos: Bool = false,
+                faceAgeType: Int? = nil) {
         self.id = id
         self.personID = personID
         self.approximateAge = approximateAge
+        self._fromPhotos = fromPhotos ? true : nil
+        self.faceAgeType = faceAgeType
     }
 }
 

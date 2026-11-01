@@ -128,29 +128,39 @@ final class ThumbnailLoader {
 
 struct AssetThumbnail: View {
     var assetID: String
+    /// Width in points; `.infinity` fills the available width.
     var side: CGFloat
     var height: CGFloat?
     var cornerRadius: CGFloat = 10
     var _loader = State<ThumbnailLoader>(initialValue: ThumbnailLoader())
     private var loader: ThumbnailLoader { get { _loader.wrappedValue } nonmutating set { _loader.wrappedValue = newValue } }
 
+    private var requestSide: CGFloat { side.isFinite ? max(side, height ?? side) : max(320, height ?? 320) }
+
     var body: some View {
-        ZStack {
-            Rectangle().fill(Color.secondary.opacity(0.12))
-            if let image = loader.image {
-                Image(nsImage: image)
-                    .resizable()
-                    .scaledToFill()
-            } else {
-                Image(systemName: "photo")
-                    .foregroundStyle(.tertiary)
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        // The image is an overlay on a fixed-size base so its cropped-off part can't stretch the layout
+        // or catch clicks meant for neighboring views (clipShape alone only clips the drawing).
+        Rectangle()
+            .fill(Color.secondary.opacity(0.12))
+            .frame(maxWidth: side.isFinite ? side : .infinity)
+            .frame(width: side.isFinite ? side : nil, height: height ?? (side.isFinite ? side : 180))
+            .overlay {
+                if let image = loader.image {
+                    Image(nsImage: image)
+                        .resizable()
+                        .scaledToFill()
+                        .allowsHitTesting(false)
+                } else {
+                    Image(systemName: "photo")
+                        .foregroundStyle(.tertiary)
+                }
             }
-        }
-        .frame(width: side, height: height ?? side)
-        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
-        .onAppear { loader.load(assetID, side: max(side, height ?? side)) }
-        .onDisappear { loader.cancel() }
-        .onChange(of: assetID) { _, new in loader.load(new, side: max(side, height ?? side)) }
+            .clipShape(shape)
+            .contentShape(shape)
+            .onAppear { loader.load(assetID, side: requestSide) }
+            .onDisappear { loader.cancel() }
+            .onChange(of: assetID) { _, new in loader.load(new, side: requestSide) }
     }
 }
 
@@ -268,4 +278,30 @@ struct StrengthDots: View {
 
 extension Date {
     var shortDay: String { formatted(date: .abbreviated, time: .omitted) }
+}
+
+/// A number field that updates as you type. (A `TextField(value:format:)` only commits on Return or
+/// when focus leaves, so a typed year was easy to lose by clicking somewhere else.)
+struct NumberField: View {
+    var title: String
+    @Binding var value: Int?
+    var range: ClosedRange<Int>
+    var width: CGFloat = 64
+    @State private var draft = ""
+
+    var body: some View {
+        TextField(title, text: $draft)
+            .textFieldStyle(.roundedBorder)
+            .frame(width: width)
+            .onAppear { draft = value.map { String($0) } ?? "" }
+            .onChange(of: value) { _, new in
+                let text = new.map { String($0) } ?? ""
+                if text != draft.filter(\.isNumber) { draft = text }
+            }
+            .onChange(of: draft) { _, text in
+                let digits = text.filter(\.isNumber)
+                if digits.isEmpty { if value != nil { value = nil } }
+                else if let n = Int(digits), range.contains(n), n != value { value = n }
+            }
+    }
 }

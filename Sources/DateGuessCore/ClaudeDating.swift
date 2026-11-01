@@ -479,15 +479,7 @@ public enum AIEvidenceMapper {
             out.append(DateEvidence(source: .aiClue, summary: "\(label): \(clue.observation) (\(range))"))
         }
 
-        for sighting in r.people {
-            let name = sighting.name.trimmingCharacters(in: .whitespaces).lowercased()
-            guard let person = people.first(where: { $0.name.lowercased() == name }) else { continue }
-            if sighting.matchConfidence >= 0.6 { out.append(PeopleClues.presence(of: person)) }
-            if sighting.matchConfidence >= 0.4 {
-                out.append(PeopleClues.age(of: person, ageLow: sighting.apparentAgeLow, ageHigh: sighting.apparentAgeHigh,
-                                           matchConfidence: sighting.matchConfidence))
-            }
-        }
+        out += peopleEvidence(r.people, people: people)
 
         if !r.isScannedPrint, let libraryDate {
             let y = Calendar.current.component(.year, from: libraryDate)
@@ -495,6 +487,21 @@ public enum AIEvidenceMapper {
                 out.append(DateEvidence(source: .libraryDate,
                                         summary: "Looks born-digital rather than a scanned print, so the library date (\(y)) is probably close",
                                         yearLow: y - 1, yearHigh: y, peakYear: y, weight: 0.5))
+            }
+        }
+        return out
+    }
+
+    /// Kept separate so sightings can be matched again whenever the user edits their people.
+    public static func peopleEvidence(_ sightings: [AIPhotoResult.PersonSighting], people: [PersonInfo]) -> [DateEvidence] {
+        var out: [DateEvidence] = []
+        for sighting in sightings {
+            guard let person = PersonMatcher.match(sighting.name, in: people) else { continue }
+            if sighting.matchConfidence >= 0.6, let e = PeopleClues.presence(of: person) { out.append(e) }
+            if sighting.matchConfidence >= 0.4,
+               let e = PeopleClues.age(of: person, ageLow: sighting.apparentAgeLow, ageHigh: sighting.apparentAgeHigh,
+                                       matchConfidence: sighting.matchConfidence) {
+                out.append(e)
             }
         }
         return out

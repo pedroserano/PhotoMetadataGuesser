@@ -248,7 +248,7 @@ public enum TextClues {
     }
 
     static let seasonalWords: [SeasonalWord] = [
-        .init(pattern: "christmas|xmas|x-mas|noel|santa", label: "Christmas", season: .winter, month: 12, strength: 1),
+        .init(pattern: "christmas|xmas|x-mas|noel|santa(?: claus)?|st\\.? nick", label: "Christmas", season: .winter, month: 12, strength: 1),
         .init(pattern: "hanukkah|chanukah", label: "Hanukkah", season: .winter, month: 12, strength: 1),
         .init(pattern: "new ?year'?s?(?: eve| day)?|nye", label: "New Year", season: .winter, month: 1, strength: 0.8),
         .init(pattern: "valentine'?s?", label: "Valentine's Day", season: .winter, month: 2, strength: 1),

@@ -34,6 +34,25 @@ final class PhotoLibraryService: @unchecked Sendable {
         await PHPhotoLibrary.requestAuthorization(for: .readWrite)
     }
 
+    /// What PhotoKit reports, saved when a scan comes back empty so access problems can be told apart.
+    func accessDiagnostics() -> [String: String] {
+        let status: String
+        switch authorizationStatus {
+        case .authorized: status = "authorized"
+        case .limited: status = "limited"
+        case .denied: status = "denied"
+        case .restricted: status = "restricted"
+        case .notDetermined: status = "notDetermined"
+        @unknown default: status = "unknown"
+        }
+        let any = PHAsset.fetchAssets(with: nil).count
+        let images = PHAsset.fetchAssets(with: .image, options: nil).count
+        return ["status": status, "allAssets": String(any), "images": String(images),
+                "userLibraryImages": String(fetchAllPhotos().count),
+                "albums": String(PHAssetCollection.fetchAssetCollections(with: .album, subtype: .any, options: nil).count),
+                "date": Date().formatted(), "bundle": Bundle.main.bundlePath]
+    }
+
     // MARK: Fetching
 
     /// Every photo in the user's own library (not shared albums), oldest first.

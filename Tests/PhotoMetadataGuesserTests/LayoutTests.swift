@@ -30,8 +30,9 @@ final class LayoutTests: XCTestCase {
 
     func testStepsFitBesideSidebar() {
         assertFits("Scan", ScanView(goNext: {}))
-        assertFits("People", PeopleView(goNext: {}))
-        assertFits("Estimate", EstimateView(goNext: {}))
+        assertFits("People & Groups", KnowView(goNext: {}))
+        assertFits("People", PeopleView())
+        assertFits("Cameras", CamerasView())
         assertFits("Review", ReviewView())
         assertFits("History", HistoryView())
         assertFits("Needs scan", NeedsScanView(step: .review, goToScan: {}))
@@ -42,13 +43,20 @@ final class LayoutTests: XCTestCase {
         let group = PhotoGroup(name: "Grandma and Grandpa’s 50th anniversary party at the lake house",
                                hint: "Probably the summer of 1978, everyone is there")
         state.groups = [group]
-        assertFits("Groups", GroupsView(goNext: {}, _selectedGroupID: State(initialValue: group.id)), state: state)
+        assertFits("Groups", GroupsView(_selectedGroupID: State(initialValue: group.id)), state: state)
         // With photos selected, the action bar appears at the bottom too.
         assertFits("Groups with selection",
-                   GroupsView(goNext: {}, _selectedGroupID: State(initialValue: group.id),
+                   GroupsView(_selectedGroupID: State(initialValue: group.id),
                               _selectedPhotos: State(initialValue: ["a", "b"])),
                    state: state)
-        assertFits("Groups without a group open", GroupsView(goNext: {}), state: state)
+        assertFits("Groups without a group open", GroupsView(), state: state)
+    }
+
+    /// A Review card's photo must fit its grid column; when it overflowed, it covered the next
+    /// column and swallowed clicks on that card's checkbox and menus.
+    func testReviewThumbnailFitsNarrowColumn() {
+        let host = NSHostingController(rootView: AssetThumbnail(assetID: "x", side: .infinity, height: 180).frame(width: 220))
+        XCTAssertLessThanOrEqual(host.sizeThatFits(in: CGSize(width: 220, height: 400)).width, 220.5)
     }
 
     func testWindowLeavesRoomForSidebarAndSteps() {

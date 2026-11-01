@@ -235,29 +235,75 @@ public enum VisualClues {
     }
 }
 
-/// Season clues from on-device scene classification labels (e.g. Vision's "snow", "beach").
+/// Season clues from on-device scene classification labels (Vision's `VNClassifyImageRequest`).
+///
+/// Labels are matched exactly: matching parts of words made "ski" find "jetski" and "ice" find "juice".
 public enum SceneClues {
-    static let keywords: [(Season, [String], String)] = [
-        (.winter, ["snow", "ski", "sled", "snowman", "icicle", "christmas", "winter", "frost"], "wintry scene"),
-        (.summer, ["beach", "swimming", "pool", "surf", "sunbathing", "watermelon", "sandcastle", "water_park"], "summery scene"),
-        (.fall, ["pumpkin", "jack_o_lantern", "halloween", "autumn", "fall_foliage", "foliage", "corn_maze"], "autumn scene"),
-        (.spring, ["blossom", "cherry_blossom", "tulip", "daffodil", "easter", "egg_hunt"], "spring scene"),
+    struct Cue {
+        let season: Season
+        /// How much the label says about the season when Vision is sure of it (0…1).
+        let strength: Double
+        let month: Int?
+        let description: String
+    }
+
+    static let cues: [String: Cue] = [
+        // Christmas: decisive, and it means December.
+        "santa_claus": Cue(season: .winter, strength: 1, month: 12, description: "Santa Claus"),
+        "christmas_tree": Cue(season: .winter, strength: 1, month: 12, description: "a Christmas tree"),
+        "christmas_decoration": Cue(season: .winter, strength: 0.9, month: 12, description: "Christmas decorations"),
+        "wreath": Cue(season: .winter, strength: 0.5, month: 12, description: "a wreath"),
+        // Snow and winter sports.
+        "snow": Cue(season: .winter, strength: 0.8, month: nil, description: "snow"),
+        "snowman": Cue(season: .winter, strength: 0.9, month: nil, description: "a snowman"),
+        "snowball": Cue(season: .winter, strength: 0.8, month: nil, description: "snowballs"),
+        "sled": Cue(season: .winter, strength: 0.8, month: nil, description: "a sled"),
+        "sledding": Cue(season: .winter, strength: 0.9, month: nil, description: "sledding"),
+        "skiing": Cue(season: .winter, strength: 0.8, month: nil, description: "skiing"),
+        "ski_equipment": Cue(season: .winter, strength: 0.7, month: nil, description: "ski gear"),
+        "ski_boot": Cue(season: .winter, strength: 0.6, month: nil, description: "ski boots"),
+        "snowboard": Cue(season: .winter, strength: 0.7, month: nil, description: "a snowboard"),
+        "snowboarding": Cue(season: .winter, strength: 0.8, month: nil, description: "snowboarding"),
+        "snowshoe": Cue(season: .winter, strength: 0.8, month: nil, description: "snowshoes"),
+        "snowmobile": Cue(season: .winter, strength: 0.8, month: nil, description: "a snowmobile"),
+        "ice_skating": Cue(season: .winter, strength: 0.6, month: nil, description: "ice skating"),
+        "ice_skates": Cue(season: .winter, strength: 0.5, month: nil, description: "ice skates"),
+        "winter_sport": Cue(season: .winter, strength: 0.7, month: nil, description: "winter sports"),
+        "mitten": Cue(season: .winter, strength: 0.5, month: nil, description: "mittens"),
+        "scarf": Cue(season: .winter, strength: 0.25, month: nil, description: "scarves"),
+        // Fall.
+        "pumpkin": Cue(season: .fall, strength: 0.7, month: 10, description: "pumpkins"),
+        "costume": Cue(season: .fall, strength: 0.35, month: 10, description: "costumes"),
+        "foliage": Cue(season: .fall, strength: 0.4, month: nil, description: "autumn leaves"),
+        // Spring.
+        "easter_egg": Cue(season: .spring, strength: 0.9, month: 4, description: "Easter eggs"),
+        "blossom": Cue(season: .spring, strength: 0.6, month: nil, description: "blossoms"),
+        "tulip": Cue(season: .spring, strength: 0.5, month: nil, description: "tulips"),
+        "daffodil": Cue(season: .spring, strength: 0.6, month: nil, description: "daffodils"),
+        // Summer.
+        "beach": Cue(season: .summer, strength: 0.6, month: nil, description: "a beach"),
+        "swimming": Cue(season: .summer, strength: 0.6, month: nil, description: "swimming"),
+        "swimsuit": Cue(season: .summer, strength: 0.6, month: nil, description: "swimsuits"),
+        "pool": Cue(season: .summer, strength: 0.5, month: nil, description: "a pool"),
+        "jetski": Cue(season: .summer, strength: 0.6, month: nil, description: "a jet ski"),
+        "sunhat": Cue(season: .summer, strength: 0.3, month: nil, description: "sun hats"),
+        "fireworks": Cue(season: .summer, strength: 0.35, month: 7, description: "fireworks"),
     ]
 
     public static func evidence(fromLabels labels: [(identifier: String, confidence: Double)]) -> [DateEvidence] {
-        var best: [Season: (Double, String)] = [:]
-        for (identifier, confidence) in labels where confidence >= 0.3 {
-            let id = identifier.lowercased()
-            for (season, words, _) in keywords where words.contains(where: { id.contains($0) }) {
-                if (best[season]?.0 ?? 0) < confidence { best[season] = (confidence, identifier) }
-            }
+        // Strongest cue per season.
+        var best: [Season: (weight: Double, cue: Cue, confidence: Double)] = [:]
+        for (identifier, confidence) in labels where confidence >= 0.15 {
+            guard let cue = cues[identifier.lowercased()] else { continue }
+            // Even a modest Vision score for something as specific as Santa is a strong sign.
+            let weight = cue.strength * min(1, 0.55 + confidence)
+            if (best[cue.season]?.weight ?? 0) < weight { best[cue.season] = (weight, cue, confidence) }
         }
-        return best.map { season, value in
-            let label = value.1.replacingOccurrences(of: "_", with: " ")
-            let month: Int? = value.1.lowercased().contains("christmas") ? 12 :
-                (value.1.lowercased().contains("halloween") || value.1.lowercased().contains("jack_o_lantern")) ? 10 : nil
-            return DateEvidence(source: .scene, summary: "Scene looks like \(label) (\(season.displayName.lowercased()))",
-                                season: season, seasonWeight: min(0.7, value.0 * 0.8), exactMonth: month)
+        return best.values.sorted { $0.weight > $1.weight }.map { item in
+            DateEvidence(source: .scene,
+                         summary: "Scene shows \(item.cue.description) (\(item.cue.season.displayName.lowercased()))",
+                         season: item.cue.season, seasonWeight: min(0.95, item.weight),
+                         exactMonth: item.weight >= 0.5 ? item.cue.month : nil)
         }
     }
 }

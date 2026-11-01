@@ -30,6 +30,8 @@
 	<true/>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
+	<key>NSContactsUsageDescription</key>
+	<string>Photo Date Guesser reads birthdays from the contact cards your Photos people are linked to, so it can tell how old they are in a photo. It changes a card only if you turn on saving birthdays to Contacts in Settings.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Photo Date Guesser looks for photos without a date, estimates when they were taken, and — only when you click Apply — sets the dates you approved.</string>
 </dict>

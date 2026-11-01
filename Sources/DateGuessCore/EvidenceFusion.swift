@@ -234,6 +234,7 @@ public enum GroupFusion {
     public static func estimates(members: [Member],
                                  groupEvidence: [DateEvidence],
                                  kind: GroupKind,
+                                 pulls: [String: EventLinks.Pull] = [:],
                                  options: EvidenceFusion.Options = .init()) -> [String: DateEstimate] {
         guard !members.isEmpty else { return [:] }
         let n = Double(members.count)
@@ -262,7 +263,14 @@ public enum GroupFusion {
             for ll in memberLL {
                 for i in 0..<groupLL.count { groupLL[i] += ll[i] }
             }
+            // Look-alike photos outside the group count for the event too (tempered like members).
+            for m in members {
+                guard let p = pulls[m.assetID] else { continue }
+                for i in 0..<groupLL.count { groupLL[i] += p.logLikelihood[i] * temper }
+                for (s, v) in p.seasonVotes { seasonVotes[s, default: 0] += v * temper }
+            }
             let memberExact = members.flatMap { $0.evidence }.filter { $0.exactMonth != nil }
+                + members.flatMap { pulls[$0.assetID]?.exactDates ?? [] }
             let shared = EvidenceFusion.estimate(from: [],
                                                  extraLogLikelihood: groupLL,
                                                  extraSeasonVotes: seasonVotes,
@@ -280,9 +288,15 @@ public enum GroupFusion {
                 for e in groupEvidence where e.seasonWeight > 0 {
                     if let s = e.season { memberSeasonVotes[s, default: 0] += e.seasonWeight }
                 }
+                let pull = pulls[m.assetID]
+                if let pull {
+                    for i in 0..<extra.count { extra[i] += pull.logLikelihood[i] }
+                    for (s, v) in pull.seasonVotes { memberSeasonVotes[s, default: 0] += v }
+                }
                 result[m.assetID] = EvidenceFusion.estimate(from: m.evidence,
                                                             extraLogLikelihood: extra,
                                                             extraSeasonVotes: memberSeasonVotes,
+                                                            extraExactDateCandidates: pull?.exactDates ?? [],
                                                             options: options)
             }
         }

@@ -16,12 +16,29 @@ final class AppState {
     var settings: AppSettings {
         didSet {
             store.save(settings, to: "settings")
-            if oldValue.allowExactMonth != settings.allowExactMonth { scheduleRecompute() }
+            if oldValue.allowExactMonth != settings.allowExactMonth || oldValue.earliestYear != settings.earliestYear {
+                scheduleRecompute()
+            }
         }
     }
     var scan: ScanSnapshot
     var groups: [PhotoGroup] { didSet { store.save(groups, to: "groups"); scheduleRecompute() } }
     var people: [PersonInfo] { didSet { store.save(people, to: "people"); scheduleRecompute() } }
+    /// People the user says are in a single photo (asset ID → who and how old).
+    var photoPeople: [String: [GroupPersonHint]] { didSet { store.save(photoPeople, to: "photoPeople"); scheduleRecompute() } }
+    /// Face tags read from the Photos library's People album.
+    var taggedPeople: [TaggedPerson] { didSet { store.save(taggedPeople, to: "taggedPeople"); scheduleRecompute() } }
+    /// When the user used each camera.
+    var cameraPeriods: [CameraPeriod] { didSet { store.save(cameraPeriods, to: "cameraPeriods"); scheduleRecompute() } }
+    /// Faces Photos detected in undated photos (asset ID → faces).
+    var detectedFaces: [String: [DetectedFace]] { didSet { store.save(detectedFaces, to: "detectedFaces"); scheduleRecompute() } }
+    /// Image fingerprints of undated photos, used to find look-alikes from the same event.
+    var featurePrints: [String: Data] = [:]
+    /// Look-alike matches between undated photos (recomputed when fingerprints, faces or the scan change).
+    var eventLinks: [String: [EventLinks.Link]] = [:]
+    @ObservationIgnored private var printsSaveTask: Task<Void, Never>?
+    @ObservationIgnored private var linksTask: Task<Void, Never>?
+    var isImportingPeople = false
     var analyses: [String: PhotoAnalysis]
     var decisions: [String: ReviewDecision] { didSet { scheduleDecisionSave() } }
     var journal: [ApplyBatch] { didSet { store.save(journal, to: "journal") } }
@@ -53,6 +70,11 @@ final class AppState {
         scan = store.load(ScanSnapshot.self, from: "scan") ?? ScanSnapshot()
         groups = store.load([PhotoGroup].self, from: "groups") ?? []
         people = store.load([PersonInfo].self, from: "people") ?? []
+        photoPeople = store.load([String: [GroupPersonHint]].self, from: "photoPeople") ?? [:]
+        taggedPeople = store.load([TaggedPerson].self, from: "taggedPeople") ?? []
+        detectedFaces = store.load([String: [DetectedFace]].self, from: "detectedFaces") ?? [:]
+        cameraPeriods = store.load([CameraPeriod].self, from: "cameraPeriods") ?? []
+        featurePrints = store.loadBinary([String: Data].self, from: "featurePrints") ?? [:]
         analyses = store.load([String: PhotoAnalysis].self, from: "analyses") ?? [:]
         decisions = store.load([String: ReviewDecision].self, from: "decisions") ?? [:]
         journal = store.load([ApplyBatch].self, from: "journal") ?? []
@@ -60,7 +82,18 @@ final class AppState {
         hasAPIKey = !(Keychain.readAPIKey() ?? "").isEmpty
         refreshUndatedList()
         recomputeEstimates()
-        if isAuthorized { loadAlbums() }
+        if isAuthorized {
+            loadAlbums()
+            // Picks up where a previous session stopped. On-device only, so it's free.
+            if scan.lastScan != nil {
+                startEstimation()
+                if !isEstimating { startFingerprinting() }
+            }
+        }
+        if !featurePrints.isEmpty { recomputeLinks() }
+        // Picks up names added in Photos since last time, without asking for the library again.
+        hasSavedLibrary = store.load(Data.self, from: "photosLibrary").map { !$0.isEmpty } ?? false
+        refreshFromPhotos()
     }
 
     var isAuthorized: Bool { authorization == .authorized || authorization == .limited }
@@ -93,6 +126,9 @@ final class AppState {
 
     func groupFor(_ assetID: String) -> PhotoGroup? { groups.first { $0.assetIDs.contains(assetID) } }
 
+    /// The lowest year a guess or a manual change can use.
+    var lowestYear: Int { max(YearBounds.earliestPhotoYear, settings.earliestYear ?? YearBounds.earliestPhotoYear) }
+
     /// The estimate after the user's overrides.
     func effectiveEstimate(_ id: String) -> DateEstimate? {
         guard let base = estimates[id]?.estimate else { return nil }
@@ -101,7 +137,11 @@ final class AppState {
         return base.overridden(year: d.overrideYear, season: d.overrideSeason)
     }
 
-    var pendingAnalysisIDs: [String] { undatedSorted.map(\.id).filter { analyses[$0] == nil } }
+    /// Photos never analyzed, or analyzed by older on-device rules.
+    var pendingAnalysisIDs: [String] { undatedSorted.map(\.id).filter { analyses[$0]?.isCurrent != true } }
+    /// Photos Claude hasn't looked at yet (including ones it failed on).
+    var claudePendingIDs: [String] { undatedSorted.map(\.id).filter { analyses[$0]?.usedAI != true } }
+    var canUseClaude: Bool { hasAPIKey }
     var aiFailedIDs: [String] { undatedSorted.map(\.id).filter { analyses[$0]?.aiError != nil } }
 
     func refreshUndatedList() {
@@ -118,21 +158,39 @@ final class AppState {
 
     // MARK: Scan
 
-    func startScan() {
+    /// - Parameter includeApplied: also re-check photos this app already dated. Normally they're
+    ///   skipped for good (until undone), since their files still have no capture date.
+    func startScan(includeApplied: Bool = false) {
         guard !isScanning else { return }
         isScanning = true
         banner = nil
         scanProgress = ScanProgress(phase: "Starting…")
-        let scanner = LibraryScanner(options: settings.scan, previous: scan, excludedIDs: appliedIDs.union(ignoredIDs))
+        let scanner = LibraryScanner(options: settings.scan, previous: scan, excludedIDs: includeApplied ? ignoredIDs : appliedIDs.union(ignoredIDs))
         scanTask = Task {
             do {
                 // `run` is nonisolated, so it executes off the main thread; awaiting it directly keeps cancellation working.
                 let result = try await scanner.run { p in await MainActor.run { self.scanProgress = p } }
+                self.authorization = self.library.authorizationStatus
+                // An empty library almost always means macOS isn't showing this copy of the app your
+                // photos (e.g. after a rebuild). Keep the previous results rather than wiping them.
+                guard result.totalAssets > 0 else {
+                    self.store.save(self.library.accessDiagnostics(), to: "scan-diagnostics")
+                    self.banner = self.authorization == .limited
+                        ? "Photo Date Guesser can only see the photos you picked for it. To scan your whole library, open System Settings ▸ Privacy & Security ▸ Photos and choose Full Access."
+                        : "macOS didn’t let Photo Date Guesser see any photos. Open System Settings ▸ Privacy & Security ▸ Photos, turn Photo Date Guesser off and on again (or choose Full Access), then quit and reopen the app."
+                    self.isScanning = false
+                    self.scanProgress = nil
+                    return
+                }
                 self.scan = result
                 self.store.save(result, to: "scan")
                 self.refreshUndatedList()
                 self.recomputeEstimates()
                 self.banner = "Found \(result.undated.count.formatted()) photos that need a date out of \(result.totalAssets.formatted())."
+                // Guess dates right away with the free on-device clues; Claude is a separate, opt-in step.
+                self.isScanning = false
+                self.refreshFromPhotos()
+                self.startEstimation()
             } catch is CancellationError {
                 self.banner = "Scan stopped."
             } catch {
@@ -147,15 +205,19 @@ final class AppState {
 
     // MARK: Estimate
 
-    /// - Parameter ids: photos to analyze; defaults to those not analyzed yet.
-    func startEstimation(ids: [String]? = nil) {
+    /// - Parameters:
+    ///   - ids: photos to analyze; defaults to those not analyzed yet.
+    ///   - useClaude: also send them to Claude (costs money, so only when the user asks).
+    func startEstimation(ids: [String]? = nil, useClaude: Bool = false) {
         guard !isEstimating else { return }
         let targets = (ids ?? pendingAnalysisIDs).compactMap { scan.undated[$0] }
-        guard !targets.isEmpty else { banner = "Nothing to analyze."; return }
+        guard !targets.isEmpty else { return }
         isEstimating = true
-        banner = nil
-        let engine = EstimationEngine(photos: targets, groups: groups, people: people, ai: settings.ai,
-                                      apiKey: settings.ai.enabled ? Keychain.readAPIKey() : nil)
+        if useClaude { banner = nil }
+        var ai = settings.ai
+        ai.enabled = useClaude
+        let engine = EstimationEngine(photos: targets, groups: groups, people: people, ai: ai,
+                                      apiKey: useClaude ? Keychain.readAPIKey() : nil, earliestYear: settings.earliestYear, cameras: cameraPeriods)
         estimationProgress = EstimationProgress(phase: "Starting…", total: targets.count)
         estimateTask = Task {
             await engine.run(
@@ -164,18 +226,89 @@ final class AppState {
             self.isEstimating = false
             self.saveAnalysesNow()
             self.recomputeEstimates()
-            if let p = self.estimationProgress {
-                var text = "Estimated \(p.done.formatted()) photos."
-                if p.aiFailures > 0 { text += " Claude couldn't analyze \(p.aiFailures) (on-device clues were used instead)." }
+            if useClaude, let p = self.estimationProgress {
+                var text = "Claude looked at \(p.done.formatted()) photos."
+                if p.aiFailures > 0 { text += " It couldn't analyze \(p.aiFailures) (on-device clues were used instead)." }
                 self.banner = text
             }
+            self.estimationProgress = nil
+            if !Task.isCancelled { self.startFingerprinting() }
         }
+    }
+
+    /// Fingerprints photos analyzed before fingerprints existed, then finds look-alikes.
+    func startFingerprinting() {
+        guard !isEstimating else { return }
+        let missing = undatedSorted.map(\.id).filter { featurePrints[$0] == nil && analyses[$0] != nil }
+        guard !missing.isEmpty else { recomputeLinks(); return }
+        isEstimating = true
+        estimationProgress = EstimationProgress(phase: "Comparing photos to find ones from the same event…", total: missing.count)
+        estimateTask = Task {
+            await EstimationEngine.fingerprints(
+                for: missing,
+                progress: { done in await MainActor.run { self.estimationProgress?.done = done } },
+                deliver: { batch in await MainActor.run {
+                    self.featurePrints.merge(batch) { _, new in new }
+                    self.scheduleFeaturePrintSave()
+                } })
+            self.isEstimating = false
+            self.estimationProgress = nil
+            self.saveFeaturePrintsNow()
+            self.recomputeLinks()
+        }
+    }
+
+    /// Finds look-alike photos off the main thread, then re-estimates.
+    func recomputeLinks() {
+        linksTask?.cancel()
+        let order = undatedSorted.map(\.id)
+        let packed = featurePrints.filter { scan.undated[$0.key] != nil }
+        // Who's in each photo: named people plus Photos' unnamed face groups.
+        var who: [String: Set<String>] = [:]
+        for (asset, faces) in detectedFaces { who[asset] = Set(faces.compactMap(\.clusterID)) }
+        for (asset, hints) in allPhotoPeople() { who[asset, default: []].formUnion(hints.map(\.personID.uuidString)) }
+        linksTask = Task.detached(priority: .utility) {
+            let prints = packed.mapValues(EventLinks.unpack)
+            let links = EventLinks.find(order: order, prints: prints, people: who)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                self.eventLinks = links
+                self.recomputeEstimates()
+            }
+        }
+    }
+
+    private func scheduleFeaturePrintSave() {
+        guard printsSaveTask == nil else { return }
+        printsSaveTask = Task {
+            try? await Task.sleep(nanoseconds: 15_000_000_000)
+            self.saveFeaturePrintsNow()
+        }
+    }
+
+    func saveFeaturePrintsNow() {
+        printsSaveTask?.cancel()
+        printsSaveTask = nil
+        store.saveBinary(featurePrints, to: "featurePrints")
     }
 
     func cancelEstimation() { estimateTask?.cancel() }
 
     private func receive(_ results: [PhotoAnalysis]) {
-        for r in results { analyses[r.assetID] = r }
+        var copy = analyses
+        for var r in results {
+            if let print = r.featurePrint { featurePrints[r.assetID] = print }
+            r.featurePrint = nil
+            // An on-device re-run mustn't throw away what Claude already found.
+            if !r.usedAI, let old = copy[r.assetID], old.usedAI {
+                r.aiEvidence = old.aiEvidence
+                r.aiPeople = old.aiPeople
+                r.usedAI = true
+            }
+            copy[r.assetID] = r
+        }
+        analyses = copy
+        scheduleFeaturePrintSave()
         scheduleAnalysesSave()
         scheduleRecompute(delay: 1.5)
     }
@@ -197,10 +330,15 @@ final class AppState {
         recomputeGeneration += 1
         let generation = recomputeGeneration
         let undated = scan.undated, analyses = self.analyses, groups = self.groups, people = self.people
+        let photoPeople = self.allPhotoPeople()
+        let links = self.eventLinks
         let exact = settings.allowExactMonth
+        let earliest = settings.earliestYear
+        let cameras = cameraPeriods
         Task.detached(priority: .userInitiated) {
             let result = AppState.computeEstimates(undated: undated, analyses: analyses, groups: groups,
-                                                   people: people, allowExactMonth: exact)
+                                                   people: people, photoPeople: photoPeople, links: links,
+                                                   earliestYear: earliest, cameras: cameras, allowExactMonth: exact)
             await MainActor.run {
                 if generation == self.recomputeGeneration { self.estimates = result }
             }
@@ -209,33 +347,75 @@ final class AppState {
 
     nonisolated static func computeEstimates(undated: [String: UndatedPhoto], analyses: [String: PhotoAnalysis],
                                              groups: [PhotoGroup], people: [PersonInfo],
+                                             photoPeople: [String: [GroupPersonHint]] = [:],
+                                             links: [String: [EventLinks.Link]] = [:],
+                                             earliestYear: Int? = nil,
+                                             cameras: [CameraPeriod] = [],
                                              allowExactMonth: Bool) -> [String: ComputedEstimate] {
         let options = EvidenceFusion.Options(allowExactMonth: allowExactMonth)
         var result: [String: ComputedEstimate] = [:]
         var grouped = Set<String>()
+
+        // Everything known about one photo on its own: its clues, who's in it, and when it was scanned.
+        func evidence(_ id: String, _ a: PhotoAnalysis) -> [DateEvidence] {
+            var out = a.evidence(people: people)
+            out += GroupClues.peopleEvidence(photoPeople[id] ?? [], people: people)
+            if let photo = undated[id],
+               let limit = ProvenanceClues.libraryDateLimit(reason: photo.reason, libraryDate: photo.libraryDate) {
+                out.append(limit)
+            }
+            if let earliestYear { out.append(ProvenanceClues.earliestYear(earliestYear)) }
+            if let photo = undated[id], let e = CameraClues.evidence(for: photo.format, periods: cameras) { out.append(e) }
+            return out
+        }
+
+        var own: [String: [DateEvidence]] = [:]
+        for (id, a) in analyses where undated[id] != nil { own[id] = evidence(id, a) }
+        // Look-alikes in the same group are already combined by the group itself.
+        var groupOf: [String: UUID] = [:]
+        for g in groups { for id in g.assetIDs where groupOf[id] == nil { groupOf[id] = g.id } }
+        var usable: [String: [EventLinks.Link]] = [:]
+        for (id, matches) in links {
+            let mine = groupOf[id]
+            let kept = matches.filter { own[$0.assetID] != nil && (mine == nil || groupOf[$0.assetID] != mine) }
+            if !kept.isEmpty { usable[id] = kept }
+        }
+        let pulls = EventLinks.pulls(evidence: own, links: usable, options: options)
+        func matchNote(_ id: String) -> [DateEvidence] {
+            guard let n = usable[id]?.count else { return [] }
+            return [DateEvidence(source: .group, summary: "Looks like the same event as \(n) other undated photo\(n == 1 ? "" : "s") (similar scene, clothes or people), so their clues count here too")]
+        }
 
         for g in groups {
             let members = g.assetIDs.filter { undated[$0] != nil && analyses[$0] != nil && !grouped.contains($0) }
             guard !members.isEmpty else { continue }
             let groupEvidence = GroupClues.evidence(for: g, people: people)
             let fusion = members.map { id in
-                GroupFusion.Member(assetID: id, evidence: analyses[id]!.localEvidence + analyses[id]!.aiEvidence)
+                GroupFusion.Member(assetID: id, evidence: own[id] ?? [])
             }
-            let estimates = GroupFusion.estimates(members: fusion, groupEvidence: groupEvidence, kind: g.kind, options: options)
+            let estimates = GroupFusion.estimates(members: fusion, groupEvidence: groupEvidence, kind: g.kind,
+                                                  pulls: pulls, options: options)
             let note = DateEvidence(source: .group, summary: members.count > 1
                 ? "Combined with \(members.count - 1) other photo\(members.count == 2 ? "" : "s") in “\(g.name)” (\(g.kind == .sameEvent ? "same event" : "same era"))"
                 : "In the group “\(g.name)”")
             for m in fusion {
                 guard let e = estimates[m.assetID] else { continue }
-                result[m.assetID] = ComputedEstimate(estimate: e, evidence: [note] + groupEvidence + m.evidence, groupName: g.name)
+                result[m.assetID] = ComputedEstimate(estimate: e, evidence: [note] + matchNote(m.assetID) + groupEvidence + m.evidence,
+                                                     groupName: g.name, matches: usable[m.assetID]?.map(\.assetID) ?? [])
             }
             grouped.formUnion(members)
         }
 
-        for (id, a) in analyses where undated[id] != nil && !grouped.contains(id) {
-            let evidence = a.localEvidence + a.aiEvidence
-            result[id] = ComputedEstimate(estimate: EvidenceFusion.estimate(from: evidence, options: options),
-                                          evidence: evidence, groupName: nil)
+        for (id, clues) in own where !grouped.contains(id) {
+            let estimate: DateEstimate
+            if let p = pulls[id] {
+                estimate = EvidenceFusion.estimate(from: clues, extraLogLikelihood: p.logLikelihood, extraSeasonVotes: p.seasonVotes,
+                                                   extraExactDateCandidates: p.exactDates, options: options)
+            } else {
+                estimate = EvidenceFusion.estimate(from: clues, options: options)
+            }
+            result[id] = ComputedEstimate(estimate: estimate, evidence: matchNote(id) + clues, groupName: nil,
+                                          matches: usable[id]?.map(\.assetID) ?? [])
         }
         return result
     }
@@ -330,6 +510,302 @@ final class AppState {
         refreshUndatedList()
         banner = "\(verb) \(batch.entries.count.formatted()) photos in your Photos library."
             + (batch.failures.isEmpty ? "" : " \(batch.failures.count) couldn't be changed.")
+    }
+
+    // MARK: People
+
+    func removePerson(_ id: UUID) {
+        people.removeAll { $0.id == id }
+        for i in groups.indices { groups[i].people.removeAll { $0.personID == id } }
+        photoPeople = photoPeople.compactMapValues { hints in
+            let kept = hints.filter { $0.personID != id }
+            return kept.isEmpty ? nil : kept
+        }
+    }
+
+    func setPhotoPeople(_ assetID: String, _ hints: [GroupPersonHint]) {
+        let own = hints.filter { !$0.fromPhotos || $0.approximateAge != nil }
+            .map { GroupPersonHint(id: $0.id, personID: $0.personID, approximateAge: $0.approximateAge) }
+        photoPeople[assetID] = own.isEmpty ? nil : own
+    }
+
+    /// Who's in one photo: what the user said here, plus faces Photos recognized.
+    func people(in assetID: String) -> [GroupPersonHint] {
+        people(in: assetID, clusters: clusterPeople, tagged: nil)
+    }
+
+    /// Photos person → person here. Names come only from Photos' own name tags.
+    var clusterPeople: [String: UUID] {
+        var out: [String: UUID] = [:]
+        for p in people { if let c = p.photosPersonID { out[c] = p.id } }
+        return out
+    }
+
+    private func people(in assetID: String, clusters: [String: UUID], tagged: [UUID: Set<String>]?) -> [GroupPersonHint] {
+        var hints = photoPeople[assetID] ?? []
+        func add(_ personID: UUID, ageType: Int?) {
+            if let i = hints.firstIndex(where: { $0.personID == personID }) {
+                if hints[i].faceAgeType == nil { hints[i].faceAgeType = ageType }
+            } else {
+                hints.append(GroupPersonHint(personID: personID, fromPhotos: true, faceAgeType: ageType))
+            }
+        }
+        if let faces = detectedFaces[assetID] {
+            for f in faces { if let c = f.clusterID, let id = clusters[c] { add(id, ageType: f.ageType) } }
+        } else {
+            // Imported before face positions were read: fall back to the tag list.
+            for (id, assets) in tagged ?? taggedAssetsByPerson where assets.contains(assetID) { add(id, ageType: nil) }
+        }
+        return hints
+    }
+
+    /// Linked person → the photos they're tagged in.
+    var taggedAssetsByPerson: [UUID: Set<String>] {
+        let byTag = Dictionary(taggedPeople.map { ($0.id, $0.assetIDs) }, uniquingKeysWith: { a, _ in a })
+        var out: [UUID: Set<String>] = [:]
+        for p in people { if let tag = p.photosPersonID, let ids = byTag[tag] { out[p.id] = Set(ids) } }
+        return out
+    }
+
+    func allPhotoPeople() -> [String: [GroupPersonHint]] {
+        let clusters = clusterPeople, tagged = taggedAssetsByPerson
+        var assets = Set(photoPeople.keys).union(detectedFaces.keys)
+        for ids in tagged.values { assets.formUnion(ids) }
+        var out: [String: [GroupPersonHint]] = [:]
+        for asset in assets where scan.undated[asset] != nil {
+            let hints = people(in: asset, clusters: clusters, tagged: tagged)
+            if !hints.isEmpty { out[asset] = hints }
+        }
+        return out
+    }
+
+    /// How many undated photos share this face's group.
+    func undatedPhotoCount(forCluster clusterID: String) -> Int {
+        detectedFaces.reduce(0) { $0 + ($1.value.contains { $0.clusterID == clusterID } ? 1 : 0) }
+    }
+
+    /// Reads the People album of a Photos library and adds everyone who has a name.
+    /// People already in the app (same name) are linked rather than duplicated.
+    /// The Photos library picked once, remembered with a security-scoped bookmark so the sandbox
+    /// lets the app read it again without asking.
+    var savedLibraryURL: URL? {
+        guard let data = store.load(Data.self, from: "photosLibrary") else { return nil }
+        var stale = false
+        guard let url = try? URL(resolvingBookmarkData: data, options: [.withSecurityScope, .withoutUI],
+                                 relativeTo: nil, bookmarkDataIsStale: &stale) else { return nil }
+        if stale { rememberLibrary(url) }
+        return url
+    }
+
+    private func rememberLibrary(_ url: URL) {
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        if let data = try? url.bookmarkData(options: [.withSecurityScope, .securityScopeAllowOnlyReadAccess],
+                                            includingResourceValuesForKeys: nil, relativeTo: nil) {
+            store.save(data, to: "photosLibrary")
+            hasSavedLibrary = true
+        }
+    }
+
+    /// Whether a library has been chosen (so setup doesn't ask again).
+    var hasSavedLibrary = false
+    /// Contacts access hasn't been asked for yet.
+    var contactsNotAsked = ContactBirthdays.notAskedYet
+
+    var needsLibrarySetup: Bool { !hasSavedLibrary && settings.skippedLibrarySetup != true }
+    var needsContactsSetup: Bool { contactsNotAsked && settings.skippedContactsSetup != true }
+
+    func requestContactsAccess() async {
+        let granted = await ContactBirthdays.requestAccess()
+        contactsNotAsked = ContactBirthdays.notAskedYet
+        if granted { await fillBirthdaysFromContacts(quietly: true) }
+    }
+
+    /// Set when the user goes to Photos (e.g. to name a face) so names are re-read on their return.
+    @ObservationIgnored var expectingPhotosChanges = false
+    @ObservationIgnored private var lastQuietRefresh = Date.distantPast
+
+    /// Called whenever the app comes to the front.
+    func appBecameActive() {
+        guard expectingPhotosChanges || Date().timeIntervalSince(lastQuietRefresh) > 15 * 60 else { return }
+        let retry = expectingPhotosChanges
+        expectingPhotosChanges = false
+        refreshFromPhotos()
+        // Photos can take a few seconds to save a new name; look once more shortly after.
+        if retry {
+            Task {
+                try? await Task.sleep(nanoseconds: 8_000_000_000)
+                self.refreshFromPhotos()
+            }
+        }
+    }
+
+    /// Re-reads names and faces from the remembered library, quietly.
+    func refreshFromPhotos() {
+        guard isAuthorized, scan.lastScan != nil, let library = savedLibraryURL else { return }
+        lastQuietRefresh = Date()
+        importTaggedPeople(from: library, quietly: true)
+    }
+
+    /// Opens a photo in Photos and re-reads names when the user comes back. Returns a problem, if any.
+    @discardableResult
+    func showInPhotos(_ assetID: String) async -> String? {
+        expectingPhotosChanges = true
+        let problem = await ShowInPhotos.open(assetID)
+        if let problem {
+            expectingPhotosChanges = false
+            banner = problem
+        }
+        return problem
+    }
+
+    /// - Parameter quietly: a background refresh: only speaks up if something changed.
+    func importTaggedPeople(from libraryURL: URL, quietly: Bool = false) {
+        guard !isImportingPeople else { return }
+        isImportingPeople = true
+        if !quietly { rememberLibrary(libraryURL) }
+        let undated = Set(scan.undated.keys)
+        Task.detached(priority: .userInitiated) {
+            let scoped = libraryURL.startAccessingSecurityScopedResource()
+            defer { if scoped { libraryURL.stopAccessingSecurityScopedResource() } }
+            let result = Result { try PhotosPeopleReader.read(libraryURL: libraryURL, facesFor: undated) }
+            await MainActor.run {
+                self.isImportingPeople = false
+                switch result {
+                case .failure(let error):
+                    if !quietly { self.banner = error.localizedDescription }
+                case .success(let read):
+                    let before = Set(self.taggedPeople.map { "\($0.id)|\($0.name)|\($0.assetIDs.count)" })
+                    self.detectedFaces = read.faces
+                    self.mergeTagged(read.people, undated: undated, quietly: quietly)
+                    let after = Set(self.taggedPeople.map { "\($0.id)|\($0.name)|\($0.assetIDs.count)" })
+                    if quietly && before != after {
+                        self.banner = "Updated names from Photos."
+                    }
+                    self.recomputeLinks()
+                }
+            }
+        }
+    }
+
+    private func mergeTagged(_ tagged: [TaggedPerson], undated: Set<String>, quietly: Bool = false) {
+        var list = people
+        var added = 0
+        for t in tagged {
+            // Dated photos with the biggest faces make the best reference photos for Claude.
+            let refs = Array(t.assetIDs.filter { !undated.contains($0) }.prefix(2))
+            if let i = list.firstIndex(where: { $0.photosPersonID == t.id })
+                ?? list.firstIndex(where: { $0.photosPersonID == nil && PersonMatcher.normalize($0.name) == PersonMatcher.normalize(t.name) }) {
+                list[i].photosPersonID = t.id
+                if list[i].referenceAssetIDs.isEmpty { list[i].referenceAssetIDs = refs }
+            } else {
+                list.append(PersonInfo(name: t.name, birthYear: nil, referenceAssetIDs: refs, photosPersonID: t.id))
+                added += 1
+            }
+        }
+        taggedPeople = tagged
+        people = list
+        let photos = Set(tagged.flatMap(\.assetIDs)).intersection(undated).count
+        if !quietly {
+            banner = "Found \(tagged.count) named people in Photos (\(added) new). They’re in \(photos.formatted()) of your undated photos."
+        }
+        Task { await fillBirthdaysFromContacts(quietly: quietly) }
+    }
+
+    /// The one way the UI changes a birthday: marks it as typed by hand and, if that setting is on,
+    /// saves it to the linked Contacts card once typing pauses.
+    func updateBirthday(_ personID: UUID, _ change: (inout PersonInfo) -> Void) {
+        guard let i = people.firstIndex(where: { $0.id == personID }) else { return }
+        var p = people[i]
+        change(&p)
+        guard p != people[i] else { return }
+        p.birthdayFromContacts = nil
+        people[i] = p
+        guard settings.writeBirthdaysToContacts == true, contactLink(for: p) != nil, p.birthYear != nil else { return }
+        contactWrites[personID]?.cancel()
+        contactWrites[personID] = Task {
+            try? await Task.sleep(nanoseconds: 2_500_000_000)
+            guard !Task.isCancelled else { return }
+            await self.writeBirthdayToContact(personID)
+        }
+    }
+
+    @ObservationIgnored private var contactWrites: [UUID: Task<Void, Never>] = [:]
+
+    /// How to find this person's Contacts card, if Photos linked one.
+    func contactLink(for person: PersonInfo) -> ContactBirthdays.Link? {
+        guard let tag = person.photosPersonID, let tagged = taggedPeople.first(where: { $0.id == tag }) else { return nil }
+        let link = ContactBirthdays.Link(tagged)
+        return link.isEmpty ? nil : link
+    }
+
+    private func writeBirthdayToContact(_ personID: UUID) async {
+        contactWrites[personID] = nil
+        guard let p = people.first(where: { $0.id == personID }), let year = p.birthYear, let contact = contactLink(for: p) else { return }
+        let result = await ContactBirthdays.save(.init(year: year, month: p.birthMonth, day: p.birthDay), to: contact)
+        switch result {
+        case .saved(let previous):
+            banner = previous.map { $0 != year ? "Changed \(p.name)’s birth year in Contacts from \($0) to \(year)." : "Updated \(p.name)’s birthday in Contacts." }
+                ?? "Saved \(p.name)’s birthday to Contacts."
+        case .unchanged: break
+        case .needsMonthAndDay:
+            banner = "Contacts needs a month and day for a birthday. Add them for \(p.name) to save it there."
+        case .notFound:
+            banner = "Couldn’t find \(p.name)’s linked card in Contacts."
+        case .denied:
+            banner = "To save birthdays to Contacts, allow access in System Settings ▸ Privacy & Security ▸ Contacts."
+        case .failed(let message):
+            banner = "Couldn’t save \(p.name)’s birthday to Contacts (\(message))."
+        }
+    }
+
+    /// Fills in missing birth years from the Contacts cards Photos linked people to. Never overwrites
+    /// a year the user typed.
+    func fillBirthdaysFromContacts(quietly: Bool = false) async {
+        // A background refresh never pops up the Contacts permission prompt.
+        if quietly && !ContactBirthdays.isAuthorized { return }
+        let wanted = people.filter { $0.birthYear == nil || $0.birthdayFromContacts == true }.compactMap(contactLink(for:))
+        guard !wanted.isEmpty else {
+            if quietly { return }
+            banner = taggedPeople.contains { $0.contactMatch != nil || $0.contactID != nil }
+                ? "Everyone linked to a contact already has a birth year."
+                : "Nobody here is linked to a contact in Photos yet. Click Update from Photos in the People tab first."
+            return
+        }
+        let (granted, located, found) = await ContactBirthdays.birthdays(for: wanted)
+        guard granted else {
+            if quietly { return }
+            banner = "To fill in birthdays automatically, allow Contacts access in System Settings ▸ Privacy & Security ▸ Contacts."
+            return
+        }
+        var list = people, filled = 0
+        for i in list.indices {
+            guard list[i].birthYear == nil || list[i].birthdayFromContacts == true,
+                  let tag = list[i].photosPersonID, let b = found[tag] else { continue }
+            if list[i].birthYear != b.year || list[i].birthMonth != b.month || list[i].birthDay != b.day { filled += 1 }
+            list[i].birthYear = b.year
+            list[i].birthMonth = b.month
+            list[i].birthDay = b.day
+            list[i].birthdayFromContacts = true
+        }
+        if list != people { people = list }
+        if quietly && filled == 0 { return }
+        banner = "Found \(located) of \(wanted.count) linked cards in Contacts; \(found.count) have a birthday with a year. Filled in \(filled)."
+    }
+
+    // MARK: Cameras
+
+    /// Cameras that took undated photos (scanners left out), most photos first.
+    var undatedCameras: [(name: String, count: Int)] {
+        var counts: [String: Int] = [:]
+        for p in scan.undated.values { if let c = CameraClues.camera(of: p.format) { counts[c, default: 0] += 1 } }
+        return counts.map { ($0.key, $0.value) }.sorted { $0.count != $1.count ? $0.count > $1.count : $0.name < $1.name }
+    }
+
+    func setCameraYears(_ camera: String, from: Int?, to: Int?) {
+        var list = cameraPeriods.filter { $0.id != camera }
+        if from != nil || to != nil { list.append(CameraPeriod(id: camera, fromYear: from, toYear: to)) }
+        cameraPeriods = list
     }
 
     // MARK: Groups

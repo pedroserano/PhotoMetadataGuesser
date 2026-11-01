@@ -25,6 +25,15 @@ enum ImageAnalyzer {
         return ImageStatistics.compute(rgba: pixels, width: w, height: h)
     }
 
+    /// Vision's image fingerprint, packed (see `EventLinks`). Similar-looking photos have close prints.
+    static func featurePrint(_ image: CGImage) -> Data? {
+        let request = VNGenerateImageFeaturePrintRequest()
+        try? VNImageRequestHandler(cgImage: image).perform([request])
+        guard let print = request.results?.first, print.elementType == .float else { return nil }
+        let floats = print.data.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
+        return EventLinks.pack(floats)
+    }
+
     /// Vision scene classification labels with confidence.
     static func sceneLabels(_ image: CGImage) -> [(identifier: String, confidence: Double)] {
         let request = VNClassifyImageRequest()
