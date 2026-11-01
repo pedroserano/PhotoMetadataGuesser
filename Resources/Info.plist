@@ -4,6 +4,8 @@
 <dict>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>Photo Date Guesser</string>
 	<key>CFBundleExecutable</key>
 	<string>PhotoMetadataGuesser</string>
 	<key>CFBundleIconFile</key>
@@ -14,25 +16,23 @@
 	<string>6.0</string>
 	<key>CFBundleName</key>
 	<string>Photo Date Guesser</string>
-	<key>CFBundleDisplayName</key>
-	<string>Photo Date Guesser</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0</string>
+	<string>1.1</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>2</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.photography</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
-	<key>NSHighResolutionCapable</key>
-	<true/>
-	<key>NSPrincipalClass</key>
-	<string>NSApplication</string>
 	<key>NSContactsUsageDescription</key>
 	<string>Photo Date Guesser reads birthdays from the contact cards your Photos people are linked to, so it can tell how old they are in a photo. It changes a card only if you turn on saving birthdays to Contacts in Settings.</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Photo Date Guesser looks for photos without a date, estimates when they were taken, and — only when you click Apply — sets the dates you approved.</string>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
 </dict>
 </plist>
