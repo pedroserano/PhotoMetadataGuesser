@@ -10,6 +10,8 @@ It’s built for very large libraries (250,000+ photos).
 
 ## How it works
 
+The app has three steps: **Find Undated Photos**, **What You Know** (optional) and **Review & Apply**. The first time you open it, it asks for Photos access. It then asks you to point it at your Photos library file (so it can read the names you’ve tagged) and for Contacts access (for birthdays). You can skip either and do it later.
+
 ### 1. Find undated photos
 
 The scan runs in two passes so it stays fast on huge libraries:
@@ -17,52 +19,25 @@ The scan runs in two passes so it stays fast on huge libraries:
 1. **Database pass.** It reads every photo’s library date from PhotoKit. A photo is flagged if it has no date, an impossible date, or a camera’s factory-default date (Jan 1 1970/1980/2000/2001 at midnight). It is also flagged if its date falls in a *scanning session* you entered, or if it’s in an album you marked “all undated.”
 2. **File-header pass** (optional, on by default). This catches scans and imports. Photos gives a file with no capture date the date it was scanned or imported, so those photos *look* dated. The app reads only the first few hundred KB of each original file and checks for an EXIF `DateTimeOriginal`. It also recognizes scanner metadata (Epson FastFoto, VueScan, Photomyne, …). Files are never changed. Photos that have a GPS location are trusted by default, which skips most phone pictures.
 
-Photos with a real date are skipped. Results are cached, so a re-scan doesn’t re-read files it already checked. Originals that are only in iCloud are counted as “couldn’t be checked” unless you allow downloads.
+Photos with a real date are skipped, and so are photos you already dated with this app (use **Scan Again ▸ Scan Again, Including Photos I Dated Here** to re-check them). Results are cached, so a re-scan doesn’t re-read files it already checked. Originals that are only in iCloud are counted as “couldn’t be checked” unless you allow downloads. These options are under **Options** on the scan screen.
 
-### 2. Group photos (optional)
+As soon as the scan finishes, every photo gets a free on-device estimate. There’s no separate step to run.
 
-Select photos and make a group, or accept a suggestion. Suggestions come from albums and from runs of sequentially numbered scans imported together. For each group you can say:
+### 2. What you know (optional)
 
-- **Same event** (all photos get one date) or **same era** (each photo gets its own date, nudged toward the group).
-- Free-text notes, such as “Lake Tahoe trip, late 70s” or “xmas ’85”. Years, decades, ranges, seasons and holidays in the notes are understood.
-- A year range and season, if you know them.
-- Who’s in the photos, and roughly how old they are.
+Three tabs:
 
-### 3. People & birthdays (optional)
+- **People.** Click **Import from Photos** to bring in everyone you’ve named in Photos, with the photos they’re tagged in. Names come only from Photos: to name someone, open the photo with **Show in Photos**, name the face there, and switch back. The app picks up the change on its own. Birthdays are read from the Contacts cards Photos linked people to (matched by contact ID, email, phone or name), or you can type them. If you turn it on in Settings, birthdays you type are also saved to the linked card. People who appear in the most undated photos are listed first.
+- **Groups.** Select photos and make a group, or accept a suggestion (albums, and runs of sequentially numbered scans imported together). A group is either the **same event** (one date for all) or the **same era** (each photo gets its own date, nudged toward the group). Add notes like “Lake Tahoe trip, late 70s” or “xmas ’85”, a year range, a season, and who’s there.
+- **Cameras.** Every camera that took undated photos, with how many. Enter the years you used one and its photos are dated within them. Scanners are left out.
 
-Add people with their birth year (and month, if you know it), plus one or two reference photos of their face. If someone appears looking about 10 years old and was born in 1952, that points to about 1962. Their birth year is also a hard limit: they can’t be in a photo taken before they were born.
+### 3. Review & apply
 
-### 4. Estimate dates
+Each card shows the thumbnail, the guess (“Summer 1976”), a confidence badge, the likely range and a checkbox. Change the year with the stepper or pick a season. **Why?** lists every clue behind the guess. Filter by **All / Checked / Unsure / Hidden**, sort or show one group, and bulk-check (e.g. “check all high-confidence”).
 
-Every clue becomes evidence: a year range, how strong the clue is, and sometimes a season or exact month.
+Double-click a photo for details. Every face Photos detected has a box with its name. **Who’s in this photo?** lists the people tagged there; fill in a missing birth year or how old they look. **Looks like the same event** shows look-alike photos that were dated together, with a button to make them one event.
 
-| Clue | Examples |
-|---|---|
-| Filenames | `IMG_20190704_…`, `1985-07-04`, `July 1979`, `xmas 85`, `late 70s`, `circa 1975`, `FB_IMG_<timestamp>` (camera counters like `IMG_1987` are ignored) |
-| Album names | “Grandma 1965”, “Summer ’78”, “1960s” |
-| File format & camera | HEIC means 2017 or later, Live Photo 2015 or later, RAW 2000 or later, iPhone model release years, early-digital resolutions |
-| Color & tone | Sepia, black & white, the magenta shift of faded 1960s–80s prints |
-| Border & paper | White print borders, instant-film frames, square 126/Instamatic prints |
-| Scene (on-device Vision) | Snow, beach, autumn leaves, pumpkins, Christmas trees (used for the season) |
-| **Claude visual analysis** (optional) | Fashion and clothing, hairstyles, eyeglasses, accessories, cars, phones and TVs, architecture and interiors, products, printed date stamps and photofinisher marks, paper and border styles, people’s apparent ages |
-| Your groups & people | Notes, year ranges, seasons, who’s there and how old they are |
-
-The clues are combined statistically, like weighing testimony. Each clue is a mixture: either it’s right (and narrows the year) or it’s noise. Combining them gives a probability for every year since 1830. Strong, specific clues (a printed date stamp, `1985-07-04` in a filename) outweigh vague ones (“black & white”). Clues that agree reinforce each other. The result is:
-
-- the **most likely year**, an **~80% range** (e.g. 1972–1978), and a **confidence** (the chance the year is within ±2 years);
-- a **season**, written as the month you asked for: **January** (winter), **March** (spring), **June** (summer) or **September** (fall). If the season is unknown, June is used. When a strong clue gives an exact month or date (a full date in a filename, “Christmas”), that’s used instead. You can turn this off in Settings.
-
-#### Claude visual analysis
-
-This is optional and off until you add an Anthropic API key in Settings. With it on, each photo (downsized to 1024 px by default) is sent to Claude with its filename, albums, on-device observations and your group notes. Photos you grouped go in the same request so they’re judged together. Your people’s reference photos (cropped to the face) are included so Claude can recognize them and estimate their age. Responses are structured JSON with year ranges, a season, any printed date, itemized clues and people sightings. On the review screen you can see every clue under **Why?**.
-
-- Default model: **Claude Opus 5.5**. You can switch to Sonnet 5.5 or Haiku 5.5 (much cheaper for very large batches).
-- The Estimate screen shows a cost estimate before you start, and the running cost while it works.
-- The system prompt and reference photos are prompt-cached across requests. Rate limits and server errors are retried with backoff. If Claude can’t analyze a batch, those photos fall back to on-device clues and can be retried later.
-
-### 5. Review & apply
-
-Each card shows the thumbnail, the guess (“Summer 1976”), a confidence badge, the likely range, the current library date and a checkbox. You can change the year with a stepper or pick a different season. **Why?** lists every clue behind the guess. You can filter by confidence or group, bulk-check (e.g. “check all high-confidence”), and right-click to keep a photo’s current date.
+**Ask Claude to Look Closer** (shown once you add an API key in Settings) sends the photos to Claude for a closer look. It shows the estimated cost first.
 
 **Apply** sets `PHAssetChangeRequest.creationDate` for the checked photos, in batches of 100. This is the same change as *Image ▸ Adjust Date and Time* in Photos:
 
@@ -70,6 +45,41 @@ Each card shows the thumbnail, the guess (“Summer 1976”), a confidence badge
 - Location, people, albums, keywords, captions, edits and favorites are untouched.
 - Photos makes the change itself, so its database stays consistent and iCloud Photos syncs it normally.
 - Each photo’s previous date is saved, and **History ▸ Undo** puts it back.
+
+### How dates are estimated
+
+Every clue becomes evidence: a year range, how strong the clue is, and sometimes a season or exact month.
+
+| Clue | Examples |
+|---|---|
+| Filenames | `IMG_20190704_…`, `1985-07-04`, `July 1979`, `xmas 85`, `late 70s`, `circa 1975`, `Santa visit`, `FB_IMG_<timestamp>` (camera counters like `IMG_1987` are ignored) |
+| Album names | “Grandma 1965”, “Summer ’78”, “1960s” |
+| When it was scanned | A scan or import can’t be older than the file: the library date is a firm upper limit |
+| File format & camera | HEIC means 2017 or later, Live Photo 2015 or later, RAW 2000 or later, iPhone model release years, early-digital resolutions, and the years you entered for a camera |
+| Color & tone | Sepia, black & white, the magenta shift of faded 1960s–80s prints |
+| Border & paper | White print borders, instant-film frames, square 126/Instamatic prints |
+| Scene (on-device Vision) | Santa, Christmas trees and decorations (December), snow and winter sports, pumpkins and costumes (October), Easter eggs and blossoms, beaches and pools |
+| People | Someone can’t be in a photo from before they were born; their age in it (what you enter, or Claude’s estimate) dates it. Photos’ own rough age group for each face (baby, young child, adult) is used too |
+| Look-alike photos | Undated photos that look alike (same scene, clothes or people) are dated together, so a printed date on one photo of a roll helps the others |
+| Your groups and settings | Notes, year ranges, seasons, and “no photos before” (Settings ▸ Dates) |
+| **Claude visual analysis** (optional) | Fashion and clothing, hairstyles, eyeglasses, cars, phones and TVs, architecture and interiors, printed date stamps and photofinisher marks, paper styles, people’s apparent ages |
+
+The clues are combined statistically, like weighing testimony. Each clue is a mixture: either it’s right (and narrows the year) or it’s noise. Combining them gives a probability for every year since 1830. Strong, specific clues (a printed date stamp, `1985-07-04` in a filename) outweigh vague ones (“black & white”). Clues that agree reinforce each other. The result is:
+
+- the **most likely year**, an **~80% range** (e.g. 1972–1978), and a **confidence** (the chance the year is within ±2 years);
+- a **season**, written as the month you asked for: **January** (winter), **March** (spring), **June** (summer) or **September** (fall). If the season is unknown, June is used. When a strong clue gives an exact month or date (a full date in a filename, Christmas), that’s used instead. You can turn this off in Settings.
+
+Some of these were calibrated on a real library of about 190,000 photos:
+
+- **Look-alikes.** Photos are compared with Vision image fingerprints. Below a distance of 0.5, only 1 in 10,000 pairs from different years matched, against 17% of same-day pairs. Up to 0.7 is still a strong sign.
+- **Face age groups.** Apple doesn’t document Photos’ age groups (`ZAGETYPE`). Following children from infancy across ~87,000 faces: 1 is a baby, 2 a young child (about 1–5), 3 older children through adults, and 5 older adults; 4 is almost never used. This matches the order of the one public mapping (mac4n6.com, 2020). Groups 3 and 5 overlap a lot, so they count only a little.
+
+#### Claude visual analysis
+
+This is optional and only runs when you click **Ask Claude to Look Closer**, after adding an Anthropic API key in Settings. Each photo (downsized to 1024 px by default) is sent to Claude with its filename, albums, on-device observations, your group notes and any camera years. Photos you grouped go in the same request so they’re judged together. Your people’s reference photos (cropped to the face, picked automatically from dated photos tagged in Photos) are included so Claude can recognize them and estimate their age. Responses are structured JSON with year ranges, a season, any printed date, itemized clues and people sightings.
+
+- Default model: **Claude Opus 5.5**. You can switch to Sonnet 5.5 or Haiku 5.5 (much cheaper for very large batches).
+- The system prompt and reference photos are prompt-cached across requests. Rate limits and server errors are retried with backoff. If Claude can’t analyze a batch, those photos keep their on-device estimate and can be retried later.
 
 ## Building
 
@@ -80,7 +90,7 @@ Requirements: macOS 14 Sonoma or later. You also need Apple’s free developer t
 Paste this into Terminal:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/davidwagenblast/PhotoMetadataGuesser/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/pedroserano/PhotoMetadataGuesser/main/install.sh | bash
 ```
 
 It downloads the latest source, builds the app, puts it in your Applications folder and opens it. Run the same command again to update.
@@ -104,11 +114,14 @@ Sources/DateGuessCore/        Pure-Swift logic (unit-tested)
   TextClues.swift             filename / album / hint parsing
   FormatClues.swift           file format & camera clues
   VisualClues.swift           color, sepia/B&W, borders, aspect; scene → season
-  PeopleAndUndated.swift      ages from birthdays, undated detection, group suggestions
+  PeopleAndUndated.swift      ages from birthdays and face age groups, undated detection, group suggestions
   EvidenceFusion.swift        combining clues; group fusion
+  EventLinks.swift            look-alike photos from the same event
   ClaudeDating.swift          Claude request/response, prompt, cost estimate
 Sources/PhotoMetadataGuesser/ The macOS app
-  Photos/                     PhotoKit: scanning, header reads, writing dates
+  Photos/                     PhotoKit: scanning, header reads, writing dates;
+                              reading names and faces from the Photos library; Show in Photos
+  Support/                    storage, Keychain, Contacts birthdays
   Analysis/                   Vision + image stats, estimation pipeline
   Views/                      SwiftUI screens
 Resources/                    Info.plist, entitlements, app icon
@@ -116,8 +129,10 @@ Resources/                    Info.plist, entitlements, app icon
 
 ## Privacy
 
-- Everything runs on your Mac unless you turn on Claude visual analysis.
-- With it on, a reduced-size copy of each photo, its filename and album names, your group notes, and the names and face crops of people you added are sent to Anthropic’s API.
+- Everything runs on your Mac unless you click **Ask Claude to Look Closer**.
+- When you do, a reduced-size copy of each photo, its filename and album names, your group notes, camera years, and the names, birth years and face crops of your people are sent to Anthropic’s API.
+- The Photos library file is only read (names and faces), never changed. Names are only ever added in Photos itself.
+- Contacts are only read, unless you turn on saving birthdays to Contacts in Settings.
 - Your API key is stored in the macOS Keychain.
 - App data (scan results, groups, people, estimates, undo history) lives in the app’s container under Application Support.
 
@@ -126,4 +141,7 @@ Resources/                    Info.plist, entitlements, app icon
 - Only photos in your own library are considered. Shared-album items can’t be edited through PhotoKit.
 - If you previously fixed a scan’s date in Photos (rather than in this app), its file still has no capture date, so the scan may flag it again. Right-click ▸ *Keep Current Date* hides it for good.
 - Each rebuild of an ad-hoc-signed app may make macOS ask for Photos permission again.
+- Reading names from Photos relies on the layout of Photos’ private database, which Apple can change. If an update breaks it, import shows an error and everything else keeps working.
+- If your Photos library is on an external drive, keep it connected: otherwise macOS shows the app an empty library.
+- Face boxes can be slightly off for photos you cropped in Photos.
 - Estimates are estimates. The confidence badge and **Why?** panel are there to help you decide what to trust.

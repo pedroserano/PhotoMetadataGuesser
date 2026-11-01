@@ -1,7 +1,7 @@
 #!/bin/bash
 # Installs Photo Date Guesser on this Mac:
 #
-#   curl -fsSL https://raw.githubusercontent.com/davidwagenblast/PhotoMetadataGuesser/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/pedroserano/PhotoMetadataGuesser/main/install.sh | bash
 #
 # Downloads the latest source, builds the app, puts it in Applications and opens it.
 # Needs macOS 14+ and Apple's free developer tools (it offers to install them).
@@ -14,7 +14,7 @@
 main() {
   set -euo pipefail
 
-  local repo="davidwagenblast/PhotoMetadataGuesser"
+  local repo="pedroserano/PhotoMetadataGuesser"
   local branch="${PDG_BRANCH:-main}"
   local app_name="Photo Date Guesser"
 
