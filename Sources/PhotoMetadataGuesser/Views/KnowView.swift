@@ -11,6 +11,7 @@ struct KnowView: View {
 
     enum Tab: String, CaseIterable, Identifiable {
         case people = "People"
+        case events = "Events"
         case groups = "Groups"
         case cameras = "Cameras"
         var id: String { rawValue }
@@ -19,6 +20,7 @@ struct KnowView: View {
     private var subtitle: String {
         switch tab {
         case .people: return "Who’s in your photos, and when were they born?"
+        case .events: return "Photos from the same day or occasion. Date one event, date them all."
         case .groups: return "Photos that go together, and what you remember about them."
         case .cameras: return "When you used each camera."
         }
@@ -45,6 +47,7 @@ struct KnowView: View {
             Divider()
             switch tab {
             case .people: PeopleView()
+            case .events: EventsView()
             case .groups: GroupsView()
             case .cameras: CamerasView()
             }

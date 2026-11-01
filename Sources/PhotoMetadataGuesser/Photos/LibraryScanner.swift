@@ -20,6 +20,8 @@ struct LibraryScanner {
     /// Photos this app already dated (or the user chose to ignore): never flag them again.
     var excludedIDs: Set<String>
 
+    /// Always in the background (a scan of a large library takes minutes).
+    @concurrent
     func run(progress: @escaping @Sendable (ScanProgress) async -> Void) async throws -> ScanSnapshot {
         var snapshot = ScanSnapshot()
         snapshot.checkedDatedIDs = previous.checkedDatedIDs

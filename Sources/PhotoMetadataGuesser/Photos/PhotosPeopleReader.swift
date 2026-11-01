@@ -1,5 +1,6 @@
 import Foundation
 import SQLite3
+import DateGuessCore
 
 /// A named person from the Photos library's People album and the photos they're tagged in.
 struct TaggedPerson: Codable, Hashable, Identifiable {
@@ -51,6 +52,15 @@ struct DetectedFace: Codable, Hashable {
     var ageType: Int
 }
 
+/// A dated library photo showing someone who's also in undated photos (for `EventLinks.referenceEvidence`).
+struct ReferenceCandidate: Codable, Hashable {
+    var year: Int
+    var month: Int
+    /// A location means a phone or GPS camera took it, so its date is real.
+    var hasGPS: Bool
+    var clusterIDs: [String]
+}
+
 /// Reads face tags from a Photos library.
 ///
 /// PhotoKit has no public API for People, so this reads the library's database directly, read-only,
@@ -71,13 +81,67 @@ enum PhotosPeopleReader {
         }
     }
 
-    /// Named people and their photos, plus every detected face in the photos listed in `facesFor`.
-    static func read(libraryURL: URL, facesFor assetIDs: Set<String> = []) throws -> (people: [TaggedPerson], faces: [String: [DetectedFace]]) {
+    /// Named people and their photos, every detected face in the photos listed in `facesFor`, and
+    /// dated photos of the same face groups (up to `referencesPerGroup` per group, biggest faces first).
+    static func read(libraryURL: URL, facesFor assetIDs: Set<String> = [], referencesPerGroup: Int = 300) throws
+        -> (people: [TaggedPerson], faces: [String: [DetectedFace]], references: [String: ReferenceCandidate]) {
         let handle = try open(libraryURL)
         defer { sqlite3_close(handle) }
         let people = try readPeople(handle)
         let faces = assetIDs.isEmpty ? [:] : try readFaces(handle, for: assetIDs)
-        return (people, faces)
+        let clusters = Set(faces.values.flatMap { $0.compactMap(\.clusterID) })
+        let references = clusters.isEmpty ? [:]
+            : (try? readReferences(handle, clusters: clusters, excluding: assetIDs, perGroup: referencesPerGroup)) ?? [:]
+        return (people, faces, references)
+    }
+
+    private static func readReferences(_ handle: OpaquePointer, clusters: Set<String>, excluding undated: Set<String>,
+                                       perGroup: Int) throws -> [String: ReferenceCandidate] {
+        let faceColumns = columns(of: "ZDETECTEDFACE", in: handle)
+        let assetColumns = columns(of: "ZASSET", in: handle)
+        guard let personColumn = ["ZPERSONFORFACE", "ZPERSON"].first(where: faceColumns.contains),
+              let assetColumn = ["ZASSETFORFACE", "ZASSET"].first(where: faceColumns.contains),
+              assetColumns.contains("ZDATECREATED") else { throw ReadError.unexpectedFormat("no photo dates") }
+        let uuid = columns(of: "ZPERSON", in: handle).contains("ZPERSONUUID") ? "p.ZPERSONUUID" : "CAST(p.Z_PK AS TEXT)"
+        let size = faceColumns.contains("ZSIZE") ? "coalesce(f.ZSIZE, 0)" : "0"
+        let gps = assetColumns.contains("ZLATITUDE")
+            ? "(a.ZLATITUDE BETWEEN -90 AND 90 AND a.ZLATITUDE <> 0 AND a.ZLONGITUDE <> -180)" : "0"
+        let trashed = assetColumns.contains("ZTRASHEDSTATE") ? "AND coalesce(a.ZTRASHEDSTATE, 0) = 0" : ""
+        let sql = """
+            SELECT \(uuid), a.ZUUID, a.ZDATECREATED, \(size), \(gps)
+            FROM ZDETECTEDFACE f
+            JOIN ZASSET a ON a.Z_PK = f.\(assetColumn)
+            JOIN ZPERSON p ON p.Z_PK = f.\(personColumn)
+            WHERE a.ZDATECREATED IS NOT NULL \(trashed)
+            """
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+            throw ReadError.unexpectedFormat(String(cString: sqlite3_errmsg(handle)))
+        }
+        defer { sqlite3_finalize(statement) }
+        // Photos stores dates as seconds since 2001-01-01.
+        let calendar = Calendar(identifier: .gregorian)
+        var byGroup: [String: [(asset: String, size: Double)]] = [:]
+        var info: [String: (year: Int, month: Int, gps: Bool)] = [:]
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let cluster = text(statement, 0), clusters.contains(cluster), let asset = text(statement, 1) else { continue }
+            let localID = asset + "/L0/001"
+            guard !undated.contains(localID) else { continue }
+            let date = Date(timeIntervalSinceReferenceDate: sqlite3_column_double(statement, 2))
+            let c = calendar.dateComponents([.year, .month], from: date)
+            guard let year = c.year, let month = c.month, YearBounds.isPlausible(year) else { continue }
+            byGroup[cluster, default: []].append((localID, sqlite3_column_double(statement, 3)))
+            info[localID] = (year, month, sqlite3_column_int(statement, 4) != 0)
+        }
+        var out: [String: ReferenceCandidate] = [:]
+        for (cluster, assets) in byGroup {
+            for a in assets.sorted(by: { $0.size > $1.size }).prefix(perGroup) {
+                guard let i = info[a.asset] else { continue }
+                out[a.asset, default: ReferenceCandidate(year: i.year, month: i.month, hasGPS: i.gps, clusterIDs: [])]
+                    .clusterIDs.append(cluster)
+            }
+        }
+        return out
     }
 
     private static func open(_ libraryURL: URL) throws -> OpaquePointer {

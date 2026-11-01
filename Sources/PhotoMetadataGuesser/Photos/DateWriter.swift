@@ -12,6 +12,22 @@ enum DateWriter {
     struct Change: Sendable {
         var assetID: String
         var date: Date
+        /// Only write if the photo still has the date the scan saw (`expectedCurrentDate`, which may be
+        /// nil for "no date"). Otherwise someone changed it in Photos since the scan, so it's left alone.
+        /// Undo doesn't check: it restores this app's own previous dates.
+        var requireUnchanged = false
+        var expectedCurrentDate: Date? = nil
+    }
+
+    static let changedElsewhere = "Its date was changed in Photos after the last scan, so it was left alone."
+
+    /// True when the photo's current date isn't the one the scan saw (allowing a second of rounding).
+    static func dateChangedSinceScan(current: Date?, expected: Date?) -> Bool {
+        switch (current, expected) {
+        case (nil, nil): return false
+        case let (c?, e?): return abs(c.timeIntervalSince(e)) > 1
+        default: return true
+        }
     }
 
     static let chunkSize = 100
@@ -27,6 +43,11 @@ enum DateWriter {
             for change in chunk {
                 guard let asset = assets[change.assetID] else {
                     batch.failures[change.assetID] = "Photo no longer in the library"
+                    continue
+                }
+                if change.requireUnchanged,
+                   dateChangedSinceScan(current: asset.creationDate, expected: change.expectedCurrentDate) {
+                    batch.failures[change.assetID] = changedElsewhere
                     continue
                 }
                 guard asset.canPerform(.properties) else {

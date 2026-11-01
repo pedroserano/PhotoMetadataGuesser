@@ -4,49 +4,20 @@ import DateGuessCore
 
 struct SettingsView: View {
     @Environment(AppState.self) private var state
-    var _keyDraft = State<String>(initialValue: "")
-    private var keyDraft: String { get { _keyDraft.wrappedValue } nonmutating set { _keyDraft.wrappedValue = newValue } }
     var _confirmReset = State<Bool>(initialValue: false)
     private var confirmReset: Bool { get { _confirmReset.wrappedValue } nonmutating set { _confirmReset.wrappedValue = newValue } }
 
     var body: some View {
         @Bindable var state = state
         Form {
-            Section("Claude visual analysis") {
-                Text("Optional. With a key, Review & Apply shows an “Ask Claude to Look Closer” button. Nothing is sent until you click it.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                HStack {
-                    SecureField("Anthropic API key", text: _keyDraft.projectedValue, prompt: Text(state.hasAPIKey ? "Saved in your Keychain" : "sk-ant-…"))
-                    Button("Save") {
-                        state.saveAPIKey(keyDraft)
-                        keyDraft = ""
-                    }
-                    .disabled(keyDraft.isEmpty)
-                    if state.hasAPIKey {
-                        Button("Remove", role: .destructive) { state.saveAPIKey("") }
-                    }
-                }
-                Link("Get an API key at console.anthropic.com", destination: URL(string: "https://console.anthropic.com/settings/keys")!)
-                    .font(.caption)
-                Picker("Model", selection: $state.settings.ai.model) {
-                    ForEach(AIModelOption.all) { option in
-                        Text("\(option.name) — \(option.blurb)").tag(option.id)
-                    }
-                }
-                Picker("Thoroughness", selection: $state.settings.ai.effort) {
-                    Text("Quick").tag("low")
-                    Text("Balanced").tag("medium")
-                    Text("Thorough").tag("high")
-                }
-                Picker("Image detail", selection: $state.settings.ai.imageMaxEdge) {
-                    Text("Standard (768 px)").tag(768)
-                    Text("High (1024 px)").tag(1024)
-                    Text("Very high (1568 px)").tag(1568)
-                }
-                Stepper("Photos per request: \(state.settings.ai.photosPerRequest)", value: $state.settings.ai.photosPerRequest, in: 1...10)
-                Stepper("Requests at once: \(state.settings.ai.concurrentRequests)", value: $state.settings.ai.concurrentRequests, in: 1...8)
-                Text("Higher detail and thoroughness are more accurate but cost more. Larger batches are cheaper per photo; grouped photos are always sent together.")
+            Section("Apple Intelligence") {
+                Toggle("Use Apple Intelligence to spot seasons and occasions", isOn: Binding(
+                    get: { state.settings.useAppleIntelligence != false },
+                    set: { state.settings.useAppleIntelligence = $0 ? nil : false }))
+                    .disabled(!OnDeviceModel.isAvailable)
+                Text(OnDeviceModel.isAvailable
+                     ? "Runs on this Mac; nothing is sent anywhere. It looks for snow, leaves, holiday decorations and occasions like Christmas or a beach day. It’s slower (a few seconds per photo) and only a gentle hint, so it never decides the year."
+                     : "Needs macOS 27 or later with Apple Intelligence turned on in System Settings.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

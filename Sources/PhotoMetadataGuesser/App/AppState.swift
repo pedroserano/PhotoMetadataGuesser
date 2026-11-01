@@ -19,10 +19,11 @@ final class AppState {
             if oldValue.allowExactMonth != settings.allowExactMonth || oldValue.earliestYear != settings.earliestYear {
                 scheduleRecompute()
             }
+            if oldValue.useAppleIntelligence != settings.useAppleIntelligence && usesAppleIntelligence { startEstimation() }
         }
     }
     var scan: ScanSnapshot
-    var groups: [PhotoGroup] { didSet { store.save(groups, to: "groups"); scheduleRecompute() } }
+    var groups: [PhotoGroup] { didSet { store.save(groups, to: "groups"); scheduleRecompute(); refreshEventSuggestions() } }
     var people: [PersonInfo] { didSet { store.save(people, to: "people"); scheduleRecompute() } }
     /// People the user says are in a single photo (asset ID → who and how old).
     var photoPeople: [String: [GroupPersonHint]] { didSet { store.save(photoPeople, to: "photoPeople"); scheduleRecompute() } }
@@ -36,6 +37,22 @@ final class AppState {
     var featurePrints: [String: Data] = [:]
     /// Look-alike matches between undated photos (recomputed when fingerprints, faces or the scan change).
     var eventLinks: [String: [EventLinks.Link]] = [:]
+    /// Dated photos of the same face groups as undated ones, read from the Photos library.
+    var referenceCandidates: [String: ReferenceCandidate] {
+        didSet { store.save(referenceCandidates, to: "referenceCandidates") }
+    }
+    /// Clues from matching undated photos to dated ones (see `EventLinks.referenceEvidence`).
+    var referenceClues: [String: DateEvidence] = [:]
+    /// Likely events among undated photos (see `EventClusters`), not yet saved or dismissed.
+    var eventSuggestions: [[String]] = []
+    /// The date each suggested event would get if saved now (keyed by `eventKey`).
+    var eventEstimates: [String: DateEstimate] = [:]
+    /// Each undated photo's firm year limits, from the last estimate pass.
+    @ObservationIgnored var photoLimits: [String: YearLimits] = [:]
+    @ObservationIgnored private var limitsUsedForEvents: [String: YearLimits]? = nil
+    /// Suggestions the user said aren't one event (keyed by `eventKey`).
+    var dismissedEvents: Set<String> { didSet { store.save(dismissedEvents, to: "dismissedEvents"); refreshEventSuggestions() } }
+    @ObservationIgnored private var allEventClusters: [[String]] = []
     @ObservationIgnored private var printsSaveTask: Task<Void, Never>?
     @ObservationIgnored private var linksTask: Task<Void, Never>?
     var isImportingPeople = false
@@ -46,7 +63,6 @@ final class AppState {
     // MARK: Session state
 
     var authorization: PHAuthorizationStatus
-    var hasAPIKey: Bool
     var albums: [AlbumInfo] = []
     var undatedSorted: [UndatedPhoto] = []
     var estimates: [String: ComputedEstimate] = [:]
@@ -75,11 +91,12 @@ final class AppState {
         detectedFaces = store.load([String: [DetectedFace]].self, from: "detectedFaces") ?? [:]
         cameraPeriods = store.load([CameraPeriod].self, from: "cameraPeriods") ?? []
         featurePrints = store.loadBinary([String: Data].self, from: "featurePrints") ?? [:]
+        referenceCandidates = store.load([String: ReferenceCandidate].self, from: "referenceCandidates") ?? [:]
+        dismissedEvents = store.load(Set<String>.self, from: "dismissedEvents") ?? []
         analyses = store.load([String: PhotoAnalysis].self, from: "analyses") ?? [:]
         decisions = store.load([String: ReviewDecision].self, from: "decisions") ?? [:]
         journal = store.load([ApplyBatch].self, from: "journal") ?? []
         authorization = PhotoLibraryService.shared.authorizationStatus
-        hasAPIKey = !(Keychain.readAPIKey() ?? "").isEmpty
         refreshUndatedList()
         recomputeEstimates()
         if isAuthorized {
@@ -133,16 +150,21 @@ final class AppState {
     func effectiveEstimate(_ id: String) -> DateEstimate? {
         guard let base = estimates[id]?.estimate else { return nil }
         let d = decisions[id] ?? ReviewDecision()
-        if d.overrideYear == nil && d.overrideSeason == nil { return base }
-        return base.overridden(year: d.overrideYear, season: d.overrideSeason)
+        if !d.isOverridden { return base }
+        return base.overridden(year: d.overrideYear, season: d.overrideSeason, month: d.overrideMonth)
     }
 
     /// Photos never analyzed, or analyzed by older on-device rules.
-    var pendingAnalysisIDs: [String] { undatedSorted.map(\.id).filter { analyses[$0]?.isCurrent != true } }
-    /// Photos Claude hasn't looked at yet (including ones it failed on).
-    var claudePendingIDs: [String] { undatedSorted.map(\.id).filter { analyses[$0]?.usedAI != true } }
-    var canUseClaude: Bool { hasAPIKey }
-    var aiFailedIDs: [String] { undatedSorted.map(\.id).filter { analyses[$0]?.aiError != nil } }
+    var pendingAnalysisIDs: [String] {
+        let model = usesAppleIntelligence
+        return undatedSorted.map(\.id).filter { id in
+            guard let a = analyses[id] else { return true }
+            return !a.isCurrent || (model && a.modelChecked != true)
+        }
+    }
+
+    /// Apple Intelligence is on in Settings and this Mac has it.
+    var usesAppleIntelligence: Bool { settings.useAppleIntelligence != false && OnDeviceModel.isAvailable }
 
     func refreshUndatedList() {
         let applied = appliedIDs
@@ -168,7 +190,7 @@ final class AppState {
         let scanner = LibraryScanner(options: settings.scan, previous: scan, excludedIDs: includeApplied ? ignoredIDs : appliedIDs.union(ignoredIDs))
         scanTask = Task {
             do {
-                // `run` is nonisolated, so it executes off the main thread; awaiting it directly keeps cancellation working.
+                // `run` is @concurrent, so it runs off the main thread; awaiting it directly keeps cancellation working.
                 let result = try await scanner.run { p in await MainActor.run { self.scanProgress = p } }
                 self.authorization = self.library.authorizationStatus
                 // An empty library almost always means macOS isn't showing this copy of the app your
@@ -187,9 +209,11 @@ final class AppState {
                 self.refreshUndatedList()
                 self.recomputeEstimates()
                 self.banner = "Found \(result.undated.count.formatted()) photos that need a date out of \(result.totalAssets.formatted())."
-                // Guess dates right away with the free on-device clues; Claude is a separate, opt-in step.
+                // Guess dates right away; everything runs on this Mac.
                 self.isScanning = false
                 self.refreshFromPhotos()
+                // A new scan is an explicit request to analyze, so it lifts a Stop.
+                self.settings.backgroundPaused = nil
                 self.startEstimation()
             } catch is CancellationError {
                 self.banner = "Scan stopped."
@@ -205,19 +229,13 @@ final class AppState {
 
     // MARK: Estimate
 
-    /// - Parameters:
-    ///   - ids: photos to analyze; defaults to those not analyzed yet.
-    ///   - useClaude: also send them to Claude (costs money, so only when the user asks).
-    func startEstimation(ids: [String]? = nil, useClaude: Bool = false) {
-        guard !isEstimating else { return }
+    /// Analyzes photos on this Mac. - Parameter ids: defaults to those not analyzed yet.
+    func startEstimation(ids: [String]? = nil) {
+        guard !isEstimating, settings.backgroundPaused != true else { return }
         let targets = (ids ?? pendingAnalysisIDs).compactMap { scan.undated[$0] }
-        guard !targets.isEmpty else { return }
+        guard !targets.isEmpty else { startFingerprinting(); return }
         isEstimating = true
-        if useClaude { banner = nil }
-        var ai = settings.ai
-        ai.enabled = useClaude
-        let engine = EstimationEngine(photos: targets, groups: groups, people: people, ai: ai,
-                                      apiKey: useClaude ? Keychain.readAPIKey() : nil, earliestYear: settings.earliestYear, cameras: cameraPeriods)
+        let engine = EstimationEngine(photos: targets, useOnDeviceModel: usesAppleIntelligence)
         estimationProgress = EstimationProgress(phase: "Starting…", total: targets.count)
         estimateTask = Task {
             await engine.run(
@@ -226,11 +244,6 @@ final class AppState {
             self.isEstimating = false
             self.saveAnalysesNow()
             self.recomputeEstimates()
-            if useClaude, let p = self.estimationProgress {
-                var text = "Claude looked at \(p.done.formatted()) photos."
-                if p.aiFailures > 0 { text += " It couldn't analyze \(p.aiFailures) (on-device clues were used instead)." }
-                self.banner = text
-            }
             self.estimationProgress = nil
             if !Task.isCancelled { self.startFingerprinting() }
         }
@@ -238,11 +251,15 @@ final class AppState {
 
     /// Fingerprints photos analyzed before fingerprints existed, then finds look-alikes.
     func startFingerprinting() {
-        guard !isEstimating else { return }
-        let missing = undatedSorted.map(\.id).filter { featurePrints[$0] == nil && analyses[$0] != nil }
+        guard !isEstimating, settings.backgroundPaused != true else { recomputeLinks(); return }
+        let undatedMissing = undatedSorted.map(\.id).filter { featurePrints[$0] == nil && analyses[$0] != nil }
+        let referencesMissing = trustedReferenceIDs.filter { featurePrints[$0] == nil }
+        let missing = undatedMissing + referencesMissing
         guard !missing.isEmpty else { recomputeLinks(); return }
         isEstimating = true
-        estimationProgress = EstimationProgress(phase: "Comparing photos to find ones from the same event…", total: missing.count)
+        estimationProgress = EstimationProgress(phase: undatedMissing.isEmpty ? "Comparing with your dated photos…"
+                                                    : "Comparing photos to find ones from the same event…",
+                                                total: missing.count)
         estimateTask = Task {
             await EstimationEngine.fingerprints(
                 for: missing,
@@ -258,6 +275,13 @@ final class AppState {
         }
     }
 
+    /// Dated photos whose date can be trusted: a GPS location, or a capture date the scan checked.
+    var trustedReferenceIDs: [String] {
+        referenceCandidates.compactMap { id, c in
+            (c.hasGPS || scan.checkedDatedIDs.contains(id)) && scan.undated[id] == nil ? id : nil
+        }
+    }
+
     /// Finds look-alike photos off the main thread, then re-estimates.
     func recomputeLinks() {
         linksTask?.cancel()
@@ -267,12 +291,36 @@ final class AppState {
         var who: [String: Set<String>] = [:]
         for (asset, faces) in detectedFaces { who[asset] = Set(faces.compactMap(\.clusterID)) }
         for (asset, hints) in allPhotoPeople() { who[asset, default: []].formUnion(hints.map(\.personID.uuidString)) }
+        // Dated photos to compare with: verified dates of the same people, and photos dated here.
+        var refPacked: [String: (Data, Int, Int?, Set<String>, Bool)] = [:]
+        for id in trustedReferenceIDs {
+            guard let c = referenceCandidates[id], let p = featurePrints[id] else { continue }
+            refPacked[id] = (p, c.year, c.month, Set(c.clusterIDs), false)
+        }
+        let calendar = Calendar.current
+        for batch in journal where !batch.undone {
+            for e in batch.entries {
+                guard let p = featurePrints[e.assetID] else { continue }
+                let c = calendar.dateComponents([.year, .month], from: e.newDate)
+                refPacked[e.assetID] = (p, c.year ?? 0, c.month, [], true)
+            }
+        }
+        let limits = photoLimits
+        limitsUsedForEvents = limits
         linksTask = Task.detached(priority: .utility) {
             let prints = packed.mapValues(EventLinks.unpack)
             let links = EventLinks.find(order: order, prints: prints, people: who)
+            let references = refPacked.mapValues { r in
+                EventLinks.Reference(print: EventLinks.unpack(r.0), year: r.1, month: r.2, people: r.3, datedHere: r.4)
+            }
+            let clues = EventLinks.referenceEvidence(undated: prints, people: who, references: references)
+            let events = EventClusters.find(order: order, prints: prints, people: who, limits: limits)
             guard !Task.isCancelled else { return }
             await MainActor.run {
                 self.eventLinks = links
+                self.referenceClues = clues
+                self.allEventClusters = events
+                self.refreshEventSuggestions()
                 self.recomputeEstimates()
             }
         }
@@ -292,18 +340,35 @@ final class AppState {
         store.saveBinary(featurePrints, to: "featurePrints")
     }
 
-    func cancelEstimation() { estimateTask?.cancel() }
+    /// Stops background analysis and keeps it stopped (across relaunches) until Resume.
+    func cancelEstimation() {
+        settings.backgroundPaused = true
+        estimateTask?.cancel()
+        isEstimating = false
+        estimationProgress = nil
+    }
+
+    func resumeBackgroundWork() {
+        settings.backgroundPaused = nil
+        startEstimation()
+    }
+
+    /// Photos still waiting for on-device analysis or fingerprints.
+    var backgroundWorkLeft: Int {
+        pendingAnalysisIDs.count
+            + undatedSorted.filter { featurePrints[$0.id] == nil && analyses[$0.id] != nil }.count
+    }
 
     private func receive(_ results: [PhotoAnalysis]) {
         var copy = analyses
         for var r in results {
             if let print = r.featurePrint { featurePrints[r.assetID] = print }
             r.featurePrint = nil
-            // An on-device re-run mustn't throw away what Claude already found.
-            if !r.usedAI, let old = copy[r.assetID], old.usedAI {
-                r.aiEvidence = old.aiEvidence
-                r.aiPeople = old.aiPeople
-                r.usedAI = true
+            // Keep Apple Intelligence's earlier answer if this run skipped it.
+            if r.modelChecked != true, let old = copy[r.assetID], old.modelChecked == true {
+                r.modelSeason = old.modelSeason
+                r.modelOccasion = old.modelOccasion
+                r.modelChecked = true
             }
             copy[r.assetID] = r
         }
@@ -332,33 +397,52 @@ final class AppState {
         let undated = scan.undated, analyses = self.analyses, groups = self.groups, people = self.people
         let photoPeople = self.allPhotoPeople()
         let links = self.eventLinks
+        let referenceClues = self.referenceClues
         let exact = settings.allowExactMonth
         let earliest = settings.earliestYear
         let cameras = cameraPeriods
+        let events = eventSuggestions
         Task.detached(priority: .userInitiated) {
             let result = AppState.computeEstimates(undated: undated, analyses: analyses, groups: groups,
                                                    people: people, photoPeople: photoPeople, links: links,
-                                                   earliestYear: earliest, cameras: cameras, allowExactMonth: exact)
+                                                   referenceClues: referenceClues,
+                                                   earliestYear: earliest, cameras: cameras, events: events,
+                                                   allowExactMonth: exact)
             await MainActor.run {
-                if generation == self.recomputeGeneration { self.estimates = result }
+                guard generation == self.recomputeGeneration else { return }
+                self.estimates = result.estimates
+                self.eventEstimates = result.events
+                self.photoLimits = result.limits
+                // Event suggestions depend on these limits; regroup once if they changed.
+                if result.limits != self.limitsUsedForEvents { self.recomputeLinks() }
             }
         }
+    }
+
+    struct EstimateResults {
+        var estimates: [String: ComputedEstimate] = [:]
+        /// The shared date each suggested event would get if saved now (keyed by `eventKey`).
+        var events: [String: DateEstimate] = [:]
+        /// Each photo's firm year limits (from hard constraints only).
+        var limits: [String: YearLimits] = [:]
     }
 
     nonisolated static func computeEstimates(undated: [String: UndatedPhoto], analyses: [String: PhotoAnalysis],
                                              groups: [PhotoGroup], people: [PersonInfo],
                                              photoPeople: [String: [GroupPersonHint]] = [:],
                                              links: [String: [EventLinks.Link]] = [:],
+                                             referenceClues: [String: DateEvidence] = [:],
                                              earliestYear: Int? = nil,
                                              cameras: [CameraPeriod] = [],
-                                             allowExactMonth: Bool) -> [String: ComputedEstimate] {
+                                             events: [[String]] = [],
+                                             allowExactMonth: Bool) -> EstimateResults {
         let options = EvidenceFusion.Options(allowExactMonth: allowExactMonth)
         var result: [String: ComputedEstimate] = [:]
         var grouped = Set<String>()
 
         // Everything known about one photo on its own: its clues, who's in it, and when it was scanned.
         func evidence(_ id: String, _ a: PhotoAnalysis) -> [DateEvidence] {
-            var out = a.evidence(people: people)
+            var out = a.evidence
             out += GroupClues.peopleEvidence(photoPeople[id] ?? [], people: people)
             if let photo = undated[id],
                let limit = ProvenanceClues.libraryDateLimit(reason: photo.reason, libraryDate: photo.libraryDate) {
@@ -366,11 +450,17 @@ final class AppState {
             }
             if let earliestYear { out.append(ProvenanceClues.earliestYear(earliestYear)) }
             if let photo = undated[id], let e = CameraClues.evidence(for: photo.format, periods: cameras) { out.append(e) }
+            if let e = referenceClues[id] { out.append(e) }
             return out
         }
 
         var own: [String: [DateEvidence]] = [:]
         for (id, a) in analyses where undated[id] != nil { own[id] = evidence(id, a) }
+        var limits: [String: YearLimits] = [:]
+        for (id, e) in own {
+            let l = YearLimits(e)
+            if l.low != nil || l.high != nil { limits[id] = l }
+        }
         // Look-alikes in the same group are already combined by the group itself.
         var groupOf: [String: UUID] = [:]
         for g in groups { for id in g.assetIDs where groupOf[id] == nil { groupOf[id] = g.id } }
@@ -417,7 +507,16 @@ final class AppState {
             result[id] = ComputedEstimate(estimate: estimate, evidence: matchNote(id) + clues, groupName: nil,
                                           matches: usable[id]?.map(\.assetID) ?? [])
         }
-        return result
+
+        // What each suggested event would be dated if saved as one event now: every photo's clues pooled.
+        var eventDates: [String: DateEstimate] = [:]
+        for ids in events {
+            let members = ids.compactMap { id in own[id].map { GroupFusion.Member(assetID: id, evidence: $0) } }
+            guard members.count >= 2, let shared = GroupFusion.estimates(members: members, groupEvidence: [], kind: .sameEvent,
+                                                                         options: options)[members[0].assetID] else { continue }
+            eventDates[eventKey(ids)] = shared
+        }
+        return EstimateResults(estimates: result, events: eventDates, limits: limits)
     }
 
     // MARK: Review decisions
@@ -432,6 +531,8 @@ final class AppState {
 
     func setOverride(_ id: String, year: Int?, season: Season?) {
         var d = decision(id)
+        // Picking a season replaces an exact month; "use the original guess" clears everything.
+        if season != d.overrideSeason || (year == nil && season == nil) { d.overrideMonth = nil }
         d.overrideYear = year
         d.overrideSeason = season
         d.selected = true
@@ -456,9 +557,18 @@ final class AppState {
     }
 
     var selectedForApply: [String] {
-        undatedSorted.map(\.id).filter { id in
-            let d = decision(id)
-            return d.selected && !d.ignored && effectiveEstimate(id) != nil
+        let estimated = Set(estimates.keys)
+        return Self.applyTargets(order: undatedSorted.map(\.id), applied: appliedIDs, decisions: decisions,
+                                 hasEstimate: { estimated.contains($0) })
+    }
+
+    /// The only photos Apply may change: on the undated list from the last scan, not already dated by
+    /// this app, checked, and not hidden. Groups, events and dated look-alikes never add to this.
+    nonisolated static func applyTargets(order: [String], applied: Set<String>, decisions: [String: ReviewDecision],
+                                         hasEstimate: (String) -> Bool) -> [String] {
+        order.filter { id in
+            guard let d = decisions[id], d.selected, !d.ignored, !applied.contains(id) else { return false }
+            return hasEstimate(id)
         }
     }
 
@@ -468,7 +578,8 @@ final class AppState {
         guard !isApplying else { return }
         let changes: [DateWriter.Change] = selectedForApply.compactMap { id in
             guard let date = effectiveEstimate(id)?.date() else { return nil }
-            return DateWriter.Change(assetID: id, date: date)
+            return DateWriter.Change(assetID: id, date: date, requireUnchanged: true,
+                                     expectedCurrentDate: scan.undated[id]?.libraryDate)
         }
         guard !changes.isEmpty else { return }
         isApplying = true
@@ -508,8 +619,11 @@ final class AppState {
         isApplying = false
         applyProgress = nil
         refreshUndatedList()
+        let skipped = batch.failures.values.filter { $0 == DateWriter.changedElsewhere }.count
+        let failed = batch.failures.count - skipped
         banner = "\(verb) \(batch.entries.count.formatted()) photos in your Photos library."
-            + (batch.failures.isEmpty ? "" : " \(batch.failures.count) couldn't be changed.")
+            + (skipped == 0 ? "" : " Skipped \(skipped) whose date was changed in Photos since the last scan.")
+            + (failed == 0 ? "" : " \(failed) couldn't be changed.")
     }
 
     // MARK: People
@@ -677,12 +791,13 @@ final class AppState {
                 case .success(let read):
                     let before = Set(self.taggedPeople.map { "\($0.id)|\($0.name)|\($0.assetIDs.count)" })
                     self.detectedFaces = read.faces
+                    self.referenceCandidates = read.references
                     self.mergeTagged(read.people, undated: undated, quietly: quietly)
                     let after = Set(self.taggedPeople.map { "\($0.id)|\($0.name)|\($0.assetIDs.count)" })
                     if quietly && before != after {
                         self.banner = "Updated names from Photos."
                     }
-                    self.recomputeLinks()
+                    self.startFingerprinting()
                 }
             }
         }
@@ -692,7 +807,7 @@ final class AppState {
         var list = people
         var added = 0
         for t in tagged {
-            // Dated photos with the biggest faces make the best reference photos for Claude.
+            // Dated photos with the biggest faces make the best pictures to show for each person.
             let refs = Array(t.assetIDs.filter { !undated.contains($0) }.prefix(2))
             if let i = list.firstIndex(where: { $0.photosPersonID == t.id })
                 ?? list.firstIndex(where: { $0.photosPersonID == nil && PersonMatcher.normalize($0.name) == PersonMatcher.normalize(t.name) }) {
@@ -793,6 +908,67 @@ final class AppState {
         banner = "Found \(located) of \(wanted.count) linked cards in Contacts; \(found.count) have a birthday with a year. Filled in \(filled)."
     }
 
+    // MARK: Events
+
+    nonisolated static func eventKey(_ ids: [String]) -> String { ids.sorted().joined(separator: ",") }
+
+    /// Suggestions minus photos already in an event group, and minus dismissed ones.
+    func refreshEventSuggestions() {
+        let inEvents = Set(groups.filter { $0.kind == .sameEvent }.flatMap(\.assetIDs))
+        eventSuggestions = allEventClusters.compactMap { cluster in
+            let open = cluster.filter { !inEvents.contains($0) && scan.undated[$0] != nil }
+            guard open.count >= 2, !dismissedEvents.contains(Self.eventKey(cluster)) else { return nil }
+            return open
+        }
+    }
+
+    /// The suggested event this photo is in, if any.
+    func eventSuggestion(containing id: String) -> [String]? { eventSuggestions.first { $0.contains(id) } }
+
+    /// Photos that might also be from the event made of `ids`, for the user to confirm.
+    func eventCandidates(for ids: [String]) -> [String] {
+        let prints = featurePrints.filter { scan.undated[$0.key] != nil }.mapValues(EventLinks.unpack)
+        var who: [String: Set<String>] = [:]
+        for (asset, faces) in detectedFaces { who[asset] = Set(faces.compactMap(\.clusterID)) }
+        return EventClusters.candidates(for: ids, prints: prints, people: who, limits: photoLimits)
+    }
+
+    func dismissEvent(_ ids: [String]) {
+        let cluster = allEventClusters.first { !Set($0).isDisjoint(with: ids) } ?? ids
+        dismissedEvents.insert(Self.eventKey(cluster))
+    }
+
+    /// Saves photos as one event with the date the user knows: they all get that one date.
+    @discardableResult
+    func saveEvent(_ ids: [String], name: String, year: Int?, month: Int?, season: Season?) -> PhotoGroup {
+        var group = createGroup(name: name, assetIDs: ids, kind: .sameEvent)
+        group.yearFrom = year
+        group.yearTo = year
+        if let month, let year {
+            // Written as a hint so the exact month is used ("July 1987").
+            group.hint = "\(DateEstimate.monthNames[month - 1]) \(year)"
+        } else {
+            group.season = season
+        }
+        if let i = groups.firstIndex(where: { $0.id == group.id }) { groups[i] = group }
+        // A date the user gave for the event is the date for every photo in it, checked for Apply.
+        if let year {
+            var copy = decisions
+            for id in ids {
+                var d = copy[id] ?? ReviewDecision()
+                guard !d.ignored else { continue }
+                d.overrideYear = year
+                d.overrideMonth = month
+                d.overrideSeason = month == nil ? season : nil
+                d.selected = true
+                copy[id] = d
+            }
+            decisions = copy
+        }
+        refreshEventSuggestions()
+        return group
+    }
+
     // MARK: Cameras
 
     /// Cameras that took undated photos (scanners left out), most photos first.
@@ -840,13 +1016,6 @@ final class AppState {
             GroupCandidate(assetID: $0.id, filename: $0.format.originalFilename, libraryDate: $0.libraryDate, albums: $0.albums)
         }
         return GroupSuggester.suggest(candidates)
-    }
-
-    // MARK: Settings
-
-    func saveAPIKey(_ key: String) {
-        Keychain.saveAPIKey(key)
-        hasAPIKey = !(Keychain.readAPIKey() ?? "").isEmpty
     }
 
     // MARK: Saving

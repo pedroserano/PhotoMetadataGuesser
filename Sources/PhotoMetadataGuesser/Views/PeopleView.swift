@@ -1,5 +1,4 @@
 import AppKit
-import PhotosUI
 import SwiftUI
 import UniformTypeIdentifiers
 import DateGuessCore
@@ -186,8 +185,6 @@ struct PersonRow: View {
     @Environment(AppState.self) private var state
     var personID: UUID
     var counts: PeopleView.Counts
-    var _showRefs = State<Bool>(initialValue: false)
-    private var showRefs: Bool { get { _showRefs.wrappedValue } nonmutating set { _showRefs.wrappedValue = newValue } }
 
     private var person: Binding<PersonInfo>? {
         guard let current = state.people.first(where: { $0.id == personID }) else { return nil }
@@ -202,12 +199,7 @@ struct PersonRow: View {
     var body: some View {
         if let person {
             HStack(spacing: 12) {
-                Button { showRefs = true } label: { avatar(person.wrappedValue) }
-                    .buttonStyle(.plain)
-                    .help("Reference photos for Claude")
-                    .popover(isPresented: _showRefs.projectedValue, arrowEdge: .trailing) {
-                        ReferencePhotosEditor(personID: personID).padding(16).frame(width: 300)
-                    }
+                avatar(person.wrappedValue)
                 VStack(alignment: .leading, spacing: 2) {
                     if person.wrappedValue.photosPersonID == nil {
                         // Added by hand in an earlier version of the app.
@@ -284,68 +276,5 @@ struct PersonRow: View {
         if p.birthYear == nil && counts.undated > 0 { parts.append("add a birth year to use") }
         if parts.isEmpty { return p.photosPersonID == nil ? "Not in Photos: name them there to link their photos" : "No undated photos" }
         return parts.joined(separator: " · ")
-    }
-}
-
-/// Up to two clear photos of someone's face, so Claude can recognize them.
-struct ReferencePhotosEditor: View {
-    @Environment(AppState.self) private var state
-    var personID: UUID
-    var _pickerItems = State<[PhotosPickerItem]>(initialValue: [])
-    private var pickerItems: [PhotosPickerItem] { get { _pickerItems.wrappedValue } nonmutating set { _pickerItems.wrappedValue = newValue } }
-
-    var body: some View {
-        let refs = state.people.first { $0.id == personID }?.referenceAssetIDs ?? []
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Reference photos").font(.headline)
-            Text("Clear photos of their face, ideally with a correct date. Claude uses them to spot this person. People imported from Photos get two automatically.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            HStack(spacing: 10) {
-                ForEach(refs, id: \.self) { id in
-                    AssetThumbnail(assetID: id, side: 110)
-                        .overlay(alignment: .topTrailing) {
-                            Button { update { $0.referenceAssetIDs.removeAll { $0 == id } } } label: {
-                                Image(systemName: "xmark.circle.fill")
-                                    .font(.title3)
-                                    .foregroundStyle(.white, .black.opacity(0.5))
-                            }
-                            .buttonStyle(.plain)
-                            .padding(4)
-                        }
-                }
-                if refs.count < 2 {
-                    PhotosPicker(selection: _pickerItems.projectedValue, maxSelectionCount: 2 - refs.count,
-                                 matching: .images, photoLibrary: .shared()) {
-                        VStack(spacing: 6) {
-                            Image(systemName: "plus").font(.title)
-                            Text("Add")
-                        }
-                        .frame(width: 110, height: 110)
-                        .background(RoundedRectangle(cornerRadius: 10).strokeBorder(style: StrokeStyle(lineWidth: 1.5, dash: [5])))
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .onChange(of: pickerItems) { _, items in
-                guard !items.isEmpty else { return }
-                let ids = items.compactMap(\.itemIdentifier)
-                pickerItems = []
-                guard !ids.isEmpty else {
-                    state.banner = "Couldn’t add that photo. Check that Photo Date Guesser has full access in System Settings ▸ Privacy & Security ▸ Photos."
-                    return
-                }
-                update { p in
-                    for id in ids where !p.referenceAssetIDs.contains(id) { p.referenceAssetIDs.append(id) }
-                    p.referenceAssetIDs = Array(p.referenceAssetIDs.prefix(2))
-                }
-            }
-        }
-    }
-
-    private func update(_ change: (inout PersonInfo) -> Void) {
-        guard let i = state.people.firstIndex(where: { $0.id == personID }) else { return }
-        change(&state.people[i])
     }
 }

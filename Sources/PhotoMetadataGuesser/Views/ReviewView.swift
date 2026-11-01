@@ -17,8 +17,6 @@ struct ReviewView: View {
     private var detailID: String? { get { _detailID.wrappedValue } nonmutating set { _detailID.wrappedValue = newValue } }
     var _confirmApply = State<Bool>(initialValue: false)
     private var confirmApply: Bool { get { _confirmApply.wrappedValue } nonmutating set { _confirmApply.wrappedValue = newValue } }
-    var _confirmClaude = State<Bool>(initialValue: false)
-    private var confirmClaude: Bool { get { _confirmClaude.wrappedValue } nonmutating set { _confirmClaude.wrappedValue = newValue } }
 
     enum Filter: String, CaseIterable, Identifiable {
         case toReview = "All"
@@ -107,22 +105,12 @@ struct ReviewView: View {
         .sheet(item: Binding(get: { detailID.map(IdentifiedString.init) }, set: { detailID = $0?.id })) { item in
             PhotoDetailSheet(assetID: item.id)
         }
-        .confirmationDialog("Ask Claude about \(state.claudePendingIDs.count.formatted()) photos?", isPresented: _confirmClaude.projectedValue) {
-            Button("Ask Claude") { state.startEstimation(ids: state.claudePendingIDs, useClaude: true) }
-        } message: {
-            Text("Estimated cost: about \(claudeCost.formatted(.currency(code: "USD"))) with \(AIModelOption.option(for: state.settings.ai.model).name). A reduced-size copy of each photo, its filename and albums, your group notes, and your people’s names and reference photos are sent to Anthropic.")
-        }
         .alert("Apply \(selectedCount.formatted()) new dates?", isPresented: _confirmApply.projectedValue) {
             Button("Apply Dates") { state.applySelected() }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Photos will update each photo’s date the same way Image ▸ Adjust Date and Time does. The photos themselves aren’t replaced, and their other details (places, people, albums, edits) stay the same. You can undo this from History.")
+            Text("Only photos without a real date that you checked are changed. Any whose date was changed in Photos since the last scan are skipped. Photos updates each date the same way Image ▸ Adjust Date and Time does: the photos aren’t replaced, and their places, people, albums and edits stay the same. You can undo this from History.")
         }
-    }
-
-    private var claudeCost: Double {
-        let refs = state.people.reduce(0) { $0 + min(2, $1.referenceAssetIDs.count) }
-        return state.settings.ai.estimatedCost(photoCount: state.claudePendingIDs.count, referenceImages: refs)
     }
 
     /// What's happening now, and the one or two things that would improve the guesses.
@@ -137,30 +125,20 @@ struct ReviewView: View {
                 Spacer(minLength: 8)
                 Button("Stop") { state.cancelEstimation() }
             }
-        } else {
-            let pending = state.claudePendingIDs.count
+        } else if state.settings.backgroundPaused == true {
             HStack(spacing: 12) {
-                if state.people.isEmpty {
-                    Button {
-                        goToKnow()
-                    } label: {
-                        Label("Add People & Birthdays", systemImage: "person.badge.plus")
-                    }
-                }
-                if pending > 0 {
-                    if state.canUseClaude {
-                        Button {
-                            confirmClaude = true
-                        } label: {
-                            Label("Ask Claude to Look Closer (\(pending.formatted()))", systemImage: "sparkles")
-                        }
-                        .help("Claude looks at clothes, cars, hairstyles, printed dates and the people you added.")
-                    } else {
-                        SettingsLink {
-                            Label("Get Better Guesses with Claude", systemImage: "sparkles")
-                        }
-                        .help("Add an Anthropic API key in Settings so Claude can look at clothes, cars, printed dates and faces.")
-                    }
+                Label("Background analysis is stopped (\(state.backgroundWorkLeft.formatted()) photos left).", systemImage: "pause.circle")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 8)
+                Button("Resume") { state.resumeBackgroundWork() }
+            }
+        } else if state.people.isEmpty {
+            HStack(spacing: 12) {
+                Button {
+                    goToKnow()
+                } label: {
+                    Label("Add People & Birthdays", systemImage: "person.badge.plus")
                 }
                 Spacer(minLength: 0)
             }
@@ -279,7 +257,7 @@ struct ReviewCard: View {
     var body: some View {
         if let computed = state.estimates[assetID], let estimate = state.effectiveEstimate(assetID), let photo = state.photo(assetID) {
             let decision = state.decision(assetID)
-            let overridden = decision.overrideYear != nil || decision.overrideSeason != nil
+            let overridden = decision.isOverridden
             VStack(alignment: .leading, spacing: 8) {
                 AssetThumbnail(assetID: assetID, side: .infinity, height: 180)
                     // Double-click only on the picture itself, so it doesn't delay clicks on the checkbox.
@@ -427,9 +405,6 @@ struct PhotoDetailSheet: View {
                         .font(.callout)
                         .foregroundStyle(.secondary)
                     }
-                    if let analysis = state.analyses[assetID], let err = analysis.aiError {
-                        Label(err, systemImage: "exclamationmark.triangle").foregroundStyle(.orange).font(.callout)
-                    }
                     Divider()
                     PhotoPeopleEditor(assetID: assetID)
                     SameEventStrip(assetID: assetID)
@@ -520,19 +495,41 @@ struct PhotoPeopleEditor: View {
     }
 }
 
-/// Undated photos that look like they're from the same event, with a way to lock them together.
+/// Undated photos that look like they're from the same event, with a way to date them all at once.
 struct SameEventStrip: View {
     @Environment(AppState.self) private var state
     var assetID: String
+    var _editing = State<EventDraft?>(initialValue: nil)
+    private var editing: EventDraft? { get { _editing.wrappedValue } nonmutating set { _editing.wrappedValue = newValue } }
 
     var body: some View {
-        let matches = state.estimates[assetID]?.matches ?? []
+        let suggestion = state.eventSuggestion(containing: assetID) ?? []
+        let links = state.estimates[assetID]?.matches ?? []
+        var seen = Set([assetID])
+        let matches = (suggestion + links).filter { seen.insert($0).inserted }
         let group = state.groupFor(assetID)
-        if !matches.isEmpty {
+        VStack(alignment: .leading, spacing: 8) {
             Divider()
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Looks like the same event").font(.headline)
-                Text("Similar scene, clothes or people, so their dates are kept close together.")
+            HStack {
+                Text("Same event").font(.headline)
+                Spacer()
+                if group?.kind != .sameEvent {
+                    Button {
+                        editing = EventDraft(ids: [assetID] + matches)
+                    } label: {
+                        Label("Date This Event…", systemImage: "calendar.badge.plus")
+                    }
+                    .help("Pick the photos from the same event and give them all one date")
+                } else if let group {
+                    Text("In the event “\(group.name)”").foregroundStyle(.secondary)
+                }
+            }
+            if matches.isEmpty {
+                Text("No look-alikes found yet. Date This Event lets you look for more from the same day.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("These look like they’re from the same day or occasion, even if they were scanned at different times.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                 ScrollView(.horizontal, showsIndicators: false) {
@@ -549,18 +546,10 @@ struct SameEventStrip: View {
                         }
                     }
                 }
-                if group?.kind != .sameEvent {
-                    Button {
-                        let ids = [assetID] + matches
-                        let g = state.createGroup(name: "Same event (\(ids.count) photos)", assetIDs: ids, kind: .sameEvent)
-                        state.banner = "Grouped \(ids.count) photos as one event: they’ll all get the same date. Rename the group under What You Know ▸ Groups."
-                        _ = g
-                    } label: {
-                        Label("These Are All the Same Event", systemImage: "square.stack.3d.up")
-                    }
-                    .help("Gives all of them one shared date")
-                }
             }
+        }
+        .sheet(item: _editing.projectedValue) { draft in
+            EventEditor(seed: draft.ids)
         }
     }
 }

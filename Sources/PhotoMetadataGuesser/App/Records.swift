@@ -38,29 +38,33 @@ struct ScanSnapshot: Codable {
 struct PhotoAnalysis: Codable, Hashable {
     var assetID: String
     var localEvidence: [DateEvidence]
-    var aiEvidence: [DateEvidence]
-    var aiError: String?
-    var usedAI: Bool
     var analyzedAt: Date
-    /// Who Claude recognized. Matched to your people at estimate time, so edits to people apply
-    /// without re-analyzing. Nil for analyses saved before this was kept.
-    var aiPeople: [AIPhotoResult.PersonSighting]? = nil
     /// Image fingerprint, carried from the engine to `AppState.featurePrints` (not saved here).
     var featurePrint: Data? = nil
     /// Which version of the on-device checks produced `localEvidence` (nil means version 1).
     var localVersion: Int? = nil
+    /// Apple Intelligence's reading (macOS 27+), kept raw so its weight can change without re-analyzing.
+    var modelSeason: Season? = nil
+    var modelOccasion: SceneClues.Occasion? = nil
+    /// Apple Intelligence has looked at this photo (so it isn't asked again).
+    var modelChecked: Bool? = nil
 
-    /// Bump when on-device rules change so existing photos are checked again (Claude's findings are kept).
+    init(assetID: String, localEvidence: [DateEvidence], analyzedAt: Date, localVersion: Int? = nil) {
+        self.assetID = assetID
+        self.localEvidence = localEvidence
+        self.analyzedAt = analyzedAt
+        self.localVersion = localVersion
+    }
+
+    /// Bump when on-device rules change so existing photos are checked again.
     /// 2: exact scene labels (Santa and Christmas trees mean winter).
     static let currentLocalVersion = 2
 
     var isCurrent: Bool { (localVersion ?? 1) >= Self.currentLocalVersion }
 
-    /// Clues from the photo itself, with people matched against the current list.
-    func evidence(people: [PersonInfo]) -> [DateEvidence] {
-        guard let aiPeople else { return localEvidence + aiEvidence }
-        return localEvidence + aiEvidence.filter { $0.source != .person }
-            + AIEvidenceMapper.peopleEvidence(aiPeople, people: people)
+    /// Clues from the photo itself.
+    var evidence: [DateEvidence] {
+        localEvidence + SceneClues.evidence(modelSeason: modelSeason, occasion: modelOccasion)
     }
 }
 
@@ -70,6 +74,10 @@ struct ReviewDecision: Codable, Hashable {
     var overrideYear: Int?
     var overrideSeason: Season?
     var ignored = false
+    /// An exact month the user set (e.g. by dating a whole event).
+    var overrideMonth: Int?
+
+    var isOverridden: Bool { overrideYear != nil || overrideSeason != nil || overrideMonth != nil }
 }
 
 struct JournalEntry: Codable, Hashable {
@@ -88,7 +96,6 @@ struct ApplyBatch: Codable, Identifiable, Hashable {
 }
 
 struct AppSettings: Codable, Hashable {
-    var ai = AISettings()
     var scan = ScanOptions()
     var allowExactMonth = true
     /// When you type a birthday, also save it to the person's linked Contacts card. Off unless turned on.
@@ -99,6 +106,10 @@ struct AppSettings: Codable, Hashable {
     var skippedLibrarySetup: Bool?
     /// The user chose "Not Now" when setup asked for Contacts access.
     var skippedContactsSetup: Bool?
+    /// Ask Apple Intelligence for seasons and occasions where it's available. Nil means on.
+    var useAppleIntelligence: Bool?
+    /// The user clicked Stop: don't restart background analysis by itself (even after relaunching).
+    var backgroundPaused: Bool?
 }
 
 /// A fused estimate ready for review.

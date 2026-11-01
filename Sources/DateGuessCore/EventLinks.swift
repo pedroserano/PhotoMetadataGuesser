@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(Accelerate)
+import Accelerate
+#endif
 
 /// Finds undated photos that are probably from the same event (same day, same clothes, same room)
 /// so their dates can agree, even when nobody grouped them.
@@ -102,6 +105,53 @@ public enum EventLinks {
         }
     }
 
+    /// Each undated photo's closest reference, if it's within the near-duplicate cutoff. Compares
+    /// every pair (tens of thousands each way), so it uses a matrix multiply: for unit vectors,
+    /// distance² = 2 − 2 · dot product.
+    static func nearestDuplicates(undated: [String: [Float]], references: [String: Reference]) -> [String: (id: String, distance: Float)] {
+        let refIDs = Array(references.keys)
+        guard let dim = references.values.first?.print.count, dim > 0, !undated.isEmpty else { return [:] }
+        let refs = refIDs.compactMap { references[$0]?.print.count == dim ? references[$0]!.print : nil }
+        guard refs.count == refIDs.count else { return [:] }
+        let refMatrix = refs.flatMap { $0 }
+        let undatedIDs = undated.keys.filter { undated[$0]?.count == dim }
+        // A little slack: packed prints are only nearly unit length; the exact check below decides.
+        let maxDot = 1 - nearDuplicateCutoff * nearDuplicateCutoff / 2 - 0.02
+        var out: [String: (id: String, distance: Float)] = [:]
+        let chunk = 256
+        for start in stride(from: 0, to: undatedIDs.count, by: chunk) {
+            let ids = Array(undatedIDs[start..<min(undatedIDs.count, start + chunk)])
+            let rows = ids.flatMap { undated[$0]! }
+            var dots = [Float](repeating: 0, count: ids.count * refs.count)
+            multiplyTransposed(rows, ids.count, refMatrix, refs.count, dim, into: &dots)
+            for (i, id) in ids.enumerated() {
+                var bestDot: Float = -2, bestJ = -1
+                for j in 0..<refs.count where dots[i * refs.count + j] > bestDot {
+                    bestDot = dots[i * refs.count + j]
+                    bestJ = j
+                }
+                guard bestJ >= 0, bestDot >= maxDot, refIDs[bestJ] != id else { continue }
+                // Confirm with the exact distance (packed prints are only nearly unit length).
+                let d = distance(undated[id]!, refs[bestJ])
+                if d < nearDuplicateCutoff { out[id] = (refIDs[bestJ], d) }
+            }
+        }
+        return out
+    }
+
+    /// c = a · bᵀ, where a is m×k and b is n×k (row-major).
+    static func multiplyTransposed(_ a: [Float], _ m: Int, _ b: [Float], _ n: Int, _ k: Int, into c: inout [Float]) {
+        #if canImport(Accelerate)
+        cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans, Int32(m), Int32(n), Int32(k), 1, a, Int32(k), b, Int32(k), 0, &c, Int32(n))
+        #else
+        for i in 0..<m { for j in 0..<n {
+            var s: Float = 0
+            for t in 0..<k { s += a[i * k + t] * b[j * k + t] }
+            c[i * n + j] = s
+        }}
+        #endif
+    }
+
     // MARK: Using links
 
     /// What a photo's matches add to it: their clues as extra log-likelihood, season votes, and dates.
@@ -156,6 +206,83 @@ public enum EventLinks {
             out[id] = EvidenceFusion.estimate(from: own, extraLogLikelihood: pull.logLikelihood,
                                               extraSeasonVotes: pull.seasonVotes,
                                               extraExactDateCandidates: pull.exactDates, options: options)
+        }
+        return out
+    }
+}
+
+// MARK: - Matching dated photos
+
+extension EventLinks {
+    /// A photo with a trustworthy date that undated photos can be compared with.
+    public struct Reference: Sendable {
+        public var print: [Float]
+        public var year: Int
+        public var month: Int?
+        /// Photos face groups (or people) in it.
+        public var people: Set<String>
+        /// Dated by the user with this app (a guess they approved) rather than by a camera.
+        public var datedHere: Bool
+
+        public init(print: [Float], year: Int, month: Int?, people: Set<String>, datedHere: Bool) {
+            self.print = print
+            self.year = year
+            self.month = month
+            self.people = people
+            self.datedHere = datedHere
+        }
+    }
+
+    /// Cutoffs measured on a real library (6,000 dated photos, 15.7 million pairs taken ≥2 years apart):
+    /// none of those pairs came closer than 0.35, while 157 same-year pairs did (duplicates, burst
+    /// shots). At 0.40, about one false match per 6 photos would appear against a 180,000-photo pool.
+    public static let nearDuplicateCutoff: Float = 0.35
+    /// A looser match counts only when the same person is in both photos.
+    public static let samePersonCutoff: Float = 0.5
+
+    /// The best dated match for each undated photo, as a clue. Only near-duplicates, or close matches
+    /// that share a person, are used: anything looser is mostly coincidence at library scale.
+    public static func referenceEvidence(undated: [String: [Float]], people: [String: Set<String>],
+                                         references: [String: Reference]) -> [String: DateEvidence] {
+        var byPerson: [String: [String]] = [:]
+        var datedHere: [String] = []
+        for (id, ref) in references {
+            for p in ref.people { byPerson[p, default: []].append(id) }
+            if ref.datedHere { datedHere.append(id) }
+        }
+        let duplicates = nearestDuplicates(undated: undated, references: references)
+        var out: [String: DateEvidence] = [:]
+        for (id, print) in undated {
+            let who = people[id] ?? []
+            var candidates = Set(datedHere)
+            for p in who { candidates.formUnion(byPerson[p] ?? []) }
+            var best: (distance: Float, ref: Reference)?
+            // A dated duplicate counts even when nobody recognizable is in it (a landscape, a pet).
+            if let dup = duplicates[id], let ref = references[dup.id] { best = (dup.distance, ref) }
+            for c in candidates where c != id {
+                guard let ref = references[c] else { continue }
+                let d = distance(print, ref.print)
+                let shared = !who.isDisjoint(with: ref.people)
+                guard d < nearDuplicateCutoff || (shared && d < samePersonCutoff) else { continue }
+                if best == nil || d < best!.distance { best = (d, ref) }
+            }
+            guard let best else { continue }
+            let ref = best.ref
+            let when = ref.month.map { "\(DateEstimate.monthNames[max(1, min(12, $0)) - 1]) \(ref.year)" } ?? "\(ref.year)"
+            let source = ref.datedHere ? " (a date you applied)" : ""
+            if best.distance < nearDuplicateCutoff {
+                out[id] = DateEvidence(source: .group,
+                                       summary: "Almost identical to a dated photo from \(when)\(source): likely the same picture",
+                                       yearLow: ref.year, yearHigh: ref.year, peakYear: ref.year,
+                                       weight: ref.datedHere ? 0.6 : 0.9,
+                                       season: ref.month.map(Season.from(month:)), seasonWeight: ref.month == nil ? 0 : 0.8,
+                                       exactMonth: ref.datedHere ? nil : ref.month)
+            } else {
+                out[id] = DateEvidence(source: .group,
+                                       summary: "Looks a lot like a dated photo of the same person from \(when)\(source)",
+                                       yearLow: ref.year - 1, yearHigh: ref.year + 1, peakYear: ref.year,
+                                       weight: ref.datedHere ? 0.3 : 0.45)
+            }
         }
         return out
     }

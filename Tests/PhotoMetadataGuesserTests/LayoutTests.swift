@@ -33,6 +33,7 @@ final class LayoutTests: XCTestCase {
         assertFits("People & Groups", KnowView(goNext: {}))
         assertFits("People", PeopleView())
         assertFits("Cameras", CamerasView())
+        assertFits("Events", EventsView())
         assertFits("Review", ReviewView())
         assertFits("History", HistoryView())
         assertFits("Needs scan", NeedsScanView(step: .review, goToScan: {}))

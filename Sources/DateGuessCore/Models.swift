@@ -52,8 +52,6 @@ public enum EvidenceSource: String, Codable, CaseIterable, Sendable {
     case borderPaper
     case printFormat
     case scene
-    case aiOverall
-    case aiClue
     case printedDate
     case person
     case groupHint
@@ -71,8 +69,6 @@ public enum EvidenceSource: String, Codable, CaseIterable, Sendable {
         case .borderPaper: return "Border & paper"
         case .printFormat: return "Print format"
         case .scene: return "Scene"
-        case .aiOverall: return "Visual analysis"
-        case .aiClue: return "Visual clue"
         case .printedDate: return "Printed date"
         case .person: return "People"
         case .groupHint: return "Your group hint"
@@ -92,8 +88,6 @@ public enum EvidenceSource: String, Codable, CaseIterable, Sendable {
         case .borderPaper: return "photo.artframe"
         case .printFormat: return "aspectratio"
         case .scene: return "mountain.2"
-        case .aiOverall: return "sparkles"
-        case .aiClue: return "eye"
         case .printedDate: return "calendar"
         case .person: return "person.2"
         case .groupHint: return "text.bubble"
@@ -239,9 +233,19 @@ public struct DateEstimate: Codable, Hashable, Sendable {
     }
 
     /// Returns a copy with a user-chosen year/season (clears exact month/day).
-    public func overridden(year newYear: Int? = nil, season newSeason: Season? = nil) -> DateEstimate {
+    public func overridden(year newYear: Int? = nil, season newSeason: Season? = nil, month newMonth: Int? = nil) -> DateEstimate {
         var copy = self
         if let newYear { copy.year = newYear }
+        // A month the user knows (e.g. for a whole event) beats any season.
+        if let m = newMonth, (1...12).contains(m) {
+            copy.month = m
+            copy.day = 1
+            copy.season = Season.from(month: m)
+            copy.usedExactMonth = true
+            copy.usedExactDay = false
+            copy.seasonIsDefault = false
+            return copy
+        }
         if let newSeason {
             copy.season = newSeason
             copy.month = newSeason.representativeMonth

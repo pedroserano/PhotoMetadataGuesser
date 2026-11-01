@@ -307,3 +307,55 @@ public enum SceneClues {
         }
     }
 }
+
+// MARK: - Season and occasion from Apple Intelligence
+
+extension SceneClues {
+    public enum Occasion: String, Codable, CaseIterable, Sendable {
+        case christmas, birthday, halloween, easter, thanksgiving, beach, wedding, graduation
+
+        /// Season, month and how much the occasion says about them (birthdays and weddings say nothing).
+        var hint: (season: Season, month: Int?, strength: Double)? {
+            switch self {
+            case .christmas: return (.winter, 12, 1)
+            case .halloween: return (.fall, 10, 1)
+            case .thanksgiving: return (.fall, 11, 1)
+            case .easter: return (.spring, 4, 1)
+            case .beach: return (.summer, nil, 0.7)
+            case .graduation: return (.summer, 6, 0.6)
+            case .birthday, .wedding: return nil
+            }
+        }
+    }
+
+    /// Weak clues from the on-device model: right about half the time when it names a season.
+    public static func evidence(modelSeason: Season?, occasion: Occasion?) -> [DateEvidence] {
+        var out: [DateEvidence] = []
+        if let modelSeason {
+            out.append(DateEvidence(source: .scene, summary: "Apple Intelligence thinks it’s \(modelSeason.displayName.lowercased())",
+                                    season: modelSeason, seasonWeight: 0.35))
+        }
+        if let occasion, let hint = occasion.hint {
+            let weight = 0.5 * hint.strength
+            out.append(DateEvidence(source: .scene, summary: "Apple Intelligence sees \(occasion.label)",
+                                    season: hint.season, seasonWeight: weight,
+                                    exactMonth: weight >= 0.5 ? hint.month : nil))
+        }
+        return out
+    }
+}
+
+extension SceneClues.Occasion {
+    var label: String {
+        switch self {
+        case .christmas: return "Christmas"
+        case .birthday: return "a birthday"
+        case .halloween: return "Halloween"
+        case .easter: return "Easter"
+        case .thanksgiving: return "Thanksgiving"
+        case .beach: return "a beach day"
+        case .wedding: return "a wedding"
+        case .graduation: return "a graduation"
+        }
+    }
+}

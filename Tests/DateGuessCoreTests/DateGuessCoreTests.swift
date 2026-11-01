@@ -65,7 +65,7 @@ final class FusionTests: XCTestCase {
 
     func testAgreeingCluesNarrow() {
         let evidence = [
-            DateEvidence(source: .aiOverall, summary: "", yearLow: 1970, yearHigh: 1980, peakYear: 1975, weight: 0.8),
+            DateEvidence(source: .groupHint, summary: "", yearLow: 1970, yearHigh: 1980, peakYear: 1975, weight: 0.8),
             DateEvidence(source: .colorTone, summary: "", yearLow: 1958, yearHigh: 1985, peakYear: 1972, weight: 0.3),
         ]
         let est = EvidenceFusion.estimate(from: evidence, options: options)
@@ -76,7 +76,7 @@ final class FusionTests: XCTestCase {
 
     func testPrintedDateWins() {
         let evidence = [
-            DateEvidence(source: .aiOverall, summary: "", yearLow: 1975, yearHigh: 1985, peakYear: 1980, weight: 0.6),
+            DateEvidence(source: .groupHint, summary: "", yearLow: 1975, yearHigh: 1985, peakYear: 1980, weight: 0.6),
             DateEvidence(source: .printedDate, summary: "", yearLow: 1983, yearHigh: 1983, peakYear: 1983, weight: 0.93,
                          season: .summer, seasonWeight: 0.95, exactMonth: 7),
         ]
@@ -89,7 +89,7 @@ final class FusionTests: XCTestCase {
 
     func testHardConstraint() {
         let evidence = [
-            DateEvidence(source: .aiOverall, summary: "", yearLow: 1960, yearHigh: 1975, peakYear: 1965, weight: 0.7),
+            DateEvidence(source: .groupHint, summary: "", yearLow: 1960, yearHigh: 1975, peakYear: 1965, weight: 0.7),
             PeopleClues.presence(of: PersonInfo(name: "Ann", birthYear: 1970))!,
         ]
         let est = EvidenceFusion.estimate(from: evidence, options: options)
@@ -127,8 +127,8 @@ final class FusionTests: XCTestCase {
 
     func testSameEventGroupSharesDate() {
         let members = [
-            GroupFusion.Member(assetID: "a", evidence: [DateEvidence(source: .aiOverall, summary: "", yearLow: 1970, yearHigh: 1976, peakYear: 1973, weight: 0.7)]),
-            GroupFusion.Member(assetID: "b", evidence: [DateEvidence(source: .aiOverall, summary: "", yearLow: 1972, yearHigh: 1978, peakYear: 1975, weight: 0.7)]),
+            GroupFusion.Member(assetID: "a", evidence: [DateEvidence(source: .groupHint, summary: "", yearLow: 1970, yearHigh: 1976, peakYear: 1973, weight: 0.7)]),
+            GroupFusion.Member(assetID: "b", evidence: [DateEvidence(source: .groupHint, summary: "", yearLow: 1972, yearHigh: 1978, peakYear: 1975, weight: 0.7)]),
             GroupFusion.Member(assetID: "c", evidence: []),
         ]
         let hint = TextClues.evidence(fromHint: "summer of 1974")
@@ -139,7 +139,7 @@ final class FusionTests: XCTestCase {
 
     func testSameEraNudges() {
         let members = [
-            GroupFusion.Member(assetID: "a", evidence: [DateEvidence(source: .aiOverall, summary: "", yearLow: 1960, yearHigh: 1990, weight: 0.5)]),
+            GroupFusion.Member(assetID: "a", evidence: [DateEvidence(source: .groupHint, summary: "", yearLow: 1960, yearHigh: 1990, weight: 0.5)]),
             GroupFusion.Member(assetID: "b", evidence: [DateEvidence(source: .printedDate, summary: "", yearLow: 1968, yearHigh: 1968, weight: 0.93)]),
         ]
         let result = GroupFusion.estimates(members: members, groupEvidence: [], kind: .sameEra, options: options)
@@ -218,51 +218,6 @@ final class VisualTests: XCTestCase {
     }
 }
 
-final class ClaudeParsingTests: XCTestCase {
-    func testParseResponse() throws {
-        let inner = """
-        {"photos":[{"photo_id":"P1","best_year":1974,"year_low":1970,"year_high":1978,"confidence":0.7,
-        "season":"summer","season_confidence":0.8,"season_reason":"beach","is_scanned_print":true,
-        "printed_or_written_date":{"text":"JUL 74","year":1974,"month":7},
-        "clues":[{"category":"clothing_fashion","observation":"bell-bottoms","year_low":1968,"year_high":1978}],
-        "people":[{"name":"Ann","apparent_age_low":4,"apparent_age_high":6,"match_confidence":0.8}],
-        "summary":"1970s beach snapshot"}]}
-        """
-        let outer: [String: Any] = [
-            "content": [["type": "thinking", "thinking": ""], ["type": "text", "text": inner]],
-            "stop_reason": "end_turn",
-            "usage": ["input_tokens": 1000, "output_tokens": 500],
-        ]
-        let data = try JSONSerialization.data(withJSONObject: outer)
-        let (results, usage) = try ClaudeClient.parse(data)
-        XCTAssertEqual(usage.inputTokens, 1000)
-        let r = try XCTUnwrap(results["P1"])
-        XCTAssertEqual(r.printedOrWrittenDate?.month, 7)
-
-        let people = [PersonInfo(name: "Ann", birthYear: 1969)]
-        let evidence = AIEvidenceMapper.evidence(from: r, people: people, libraryDate: nil)
-        let est = EvidenceFusion.estimate(from: evidence, options: .init(maxYear: 2026))
-        XCTAssertEqual(est.year, 1974)
-        XCTAssertEqual(est.month, 7)
-    }
-
-    func testRefusal() throws {
-        let outer: [String: Any] = ["content": [] as [Any], "stop_reason": "refusal", "stop_details": ["category": "other"]]
-        let data = try JSONSerialization.data(withJSONObject: outer)
-        XCTAssertThrowsError(try ClaudeClient.parse(data))
-    }
-
-    func testRequestBodyIsValidJSON() throws {
-        let client = ClaudeClient(apiKey: "x", settings: AISettings(enabled: true))
-        let body = client.requestBody(photos: [AIPhotoInput(promptID: "P1", context: "Filename: a.jpg", jpegData: Data([1, 2, 3]))],
-                                      references: [AIReferenceImage(personName: "Ann", note: "age 10", jpegData: Data([4]))],
-                                      groupContext: nil)
-        let data = try JSONSerialization.data(withJSONObject: body)
-        XCTAssertGreaterThan(data.count, 100)
-        XCTAssertEqual(body["fallbacks"] as? String, "default")
-    }
-}
-
 final class PeopleAndProvenanceTests: XCTestCase {
     let rose = PersonInfo(name: "Grandma Rose", birthYear: 1930)
     let john = PersonInfo(name: "John Smith", birthYear: 1952)
@@ -278,22 +233,13 @@ final class PeopleAndProvenanceTests: XCTestCase {
         XCTAssertNil(PersonMatcher.match("John", in: people + [PersonInfo(name: "John Doe", birthYear: 1980)]))
     }
 
-    func testSightingsUseCurrentPeople() {
-        let sighting = AIPhotoResult.PersonSighting(name: "John", apparentAgeLow: 9, apparentAgeHigh: 11, matchConfidence: 0.8)
-        XCTAssertTrue(AIEvidenceMapper.peopleEvidence([sighting], people: []).isEmpty)
-        let evidence = AIEvidenceMapper.peopleEvidence([sighting], people: [john])
-        XCTAssertEqual(evidence.count, 2)
-        let estimate = EvidenceFusion.estimate(from: evidence)
-        XCTAssertTrue((1960...1964).contains(estimate.year), "\(estimate.year)")
-    }
-
     func testScanDateIsUpperLimit() {
         let scanned = Calendar.current.date(from: DateComponents(year: 2019, month: 3, day: 2))!
         let limit = ProvenanceClues.libraryDateLimit(reason: .noCaptureDateInFile, libraryDate: scanned)
         XCTAssertEqual(limit?.yearHigh, 2019)
         XCTAssertNil(ProvenanceClues.libraryDateLimit(reason: .missingDate, libraryDate: scanned))
         // A clue that says "2020s" can't push a 2019 scan past its scan year.
-        let late = DateEvidence(source: .aiOverall, summary: "", yearLow: 2018, yearHigh: 2024, peakYear: 2022, weight: 0.8)
+        let late = DateEvidence(source: .groupHint, summary: "", yearLow: 2018, yearHigh: 2024, peakYear: 2022, weight: 0.8)
         let estimate = EvidenceFusion.estimate(from: [late, limit!])
         XCTAssertLessThanOrEqual(estimate.year, 2019)
         XCTAssertLessThanOrEqual(estimate.yearHigh, 2019)
@@ -422,5 +368,178 @@ final class SceneSeasonTests: XCTestCase {
     func testSantaInFilename() {
         let e = TextClues.evidence(fromFilename: "Santa visit 1979.jpg")
         XCTAssertTrue(e.contains { $0.season == .winter && $0.exactMonth == 12 })
+    }
+}
+
+final class AppleIntelligenceClueTests: XCTestCase {
+    func testModelSeasonIsOnlyAGentleHint() {
+        let e = SceneClues.evidence(modelSeason: .winter, occasion: nil)
+        XCTAssertEqual(e.first?.seasonWeight, 0.35)
+        XCTAssertFalse(e.contains { $0.hasYearInfo }, "never says anything about the year")
+        // A clearer clue (a beach scene) outweighs it.
+        let beach = SceneClues.evidence(fromLabels: [("beach", 0.8)])
+        XCTAssertEqual(EvidenceFusion.estimate(from: e + beach).season, .summer)
+    }
+
+    func testChristmasOccasionMeansDecember() {
+        let e = SceneClues.evidence(modelSeason: nil, occasion: .christmas)
+        let estimate = EvidenceFusion.estimate(from: e)
+        XCTAssertEqual(estimate.season, .winter)
+        XCTAssertEqual(estimate.month, 12)
+    }
+
+    func testBirthdaysSayNothingAboutTheSeason() {
+        XCTAssertTrue(SceneClues.evidence(modelSeason: nil, occasion: .birthday).isEmpty)
+    }
+}
+
+final class DatedReferenceTests: XCTestCase {
+    func unit(_ v: [Float]) -> [Float] {
+        let n = v.map { $0 * $0 }.reduce(0, +).squareRoot()
+        return v.map { $0 / n }
+    }
+
+    func testNearDuplicateOfADatedPhotoSetsTheDate() {
+        let scan = unit([1, 0.1, 0, 0])
+        let original = unit([1, 0.12, 0.02, 0])   // almost the same picture
+        let refs = ["orig": EventLinks.Reference(print: original, year: 1987, month: 7, people: [], datedHere: false)]
+        let clue = EventLinks.referenceEvidence(undated: ["scan": scan], people: [:], references: refs)["scan"]
+        XCTAssertNotNil(clue)
+        let vague = DateEvidence(source: .colorTone, summary: "", yearLow: 1958, yearHigh: 1985, peakYear: 1972, weight: 0.3)
+        let e = EvidenceFusion.estimate(from: [vague, clue!])
+        XCTAssertEqual(e.year, 1987)
+        XCTAssertEqual(e.month, 7)
+    }
+
+    func testCloseMatchNeedsTheSamePerson() {
+        let a = unit([1, 0.3, 0, 0]), b = unit([1, 0, 0.3, 0])   // close-ish, not a duplicate
+        XCTAssertGreaterThan(EventLinks.distance(a, b), EventLinks.nearDuplicateCutoff)
+        XCTAssertLessThan(EventLinks.distance(a, b), EventLinks.samePersonCutoff)
+        let ref = EventLinks.Reference(print: b, year: 1990, month: nil, people: ["rose"], datedHere: false)
+        // Nobody in common (and not even a candidate): no clue.
+        XCTAssertTrue(EventLinks.referenceEvidence(undated: ["x": a], people: ["x": ["bob"]], references: ["r": ref]).isEmpty)
+        // Same person: a softer clue around 1990.
+        let clue = EventLinks.referenceEvidence(undated: ["x": a], people: ["x": ["rose"]], references: ["r": ref])["x"]
+        XCTAssertEqual(clue?.yearLow, 1989)
+        XCTAssertEqual(clue?.yearHigh, 1991)
+    }
+
+    func testDatesAppliedHereCountLess() {
+        let p = unit([1, 0, 0, 0])
+        let ref = EventLinks.Reference(print: p, year: 1975, month: 6, people: [], datedHere: true)
+        let clue = EventLinks.referenceEvidence(undated: ["x": p], people: [:], references: ["r": ref])["x"]
+        XCTAssertEqual(clue?.weight, 0.6)
+        XCTAssertNil(clue?.exactMonth, "a guessed month isn't passed on as exact")
+    }
+}
+
+final class NearDuplicateSpeedTests: XCTestCase {
+    /// Thousands of photos each way must stay quick (it reruns whenever matches are refreshed).
+    func testNearestDuplicatesMatchesBruteForce() {
+        var rng = SystemRandomNumberGenerator()
+        func randomUnit() -> [Float] {
+            let v = (0..<64).map { _ in Float.random(in: -1...1, using: &rng) }
+            let n = v.map { $0 * $0 }.reduce(0, +).squareRoot()
+            return v.map { $0 / n }
+        }
+        var refs: [String: EventLinks.Reference] = [:]
+        for i in 0..<2000 { refs["r\(i)"] = EventLinks.Reference(print: randomUnit(), year: 1990, month: nil, people: [], datedHere: false) }
+        var undated: [String: [Float]] = [:]
+        for i in 0..<500 { undated["u\(i)"] = randomUnit() }
+        // Plant one near-duplicate.
+        undated["dup"] = refs["r7"]!.print.map { $0 + 0.01 }
+        let start = Date()
+        let found = EventLinks.nearestDuplicates(undated: undated, references: refs)
+        XCTAssertLessThan(Date().timeIntervalSince(start), 2)
+        XCTAssertEqual(found["dup"]?.id, "r7")
+        XCTAssertEqual(found.count, 1, "random photos aren't duplicates")
+    }
+}
+
+final class EventClusterTests: XCTestCase {
+    func unit(_ v: [Float]) -> [Float] {
+        let n = v.map { $0 * $0 }.reduce(0, +).squareRoot()
+        return v.map { $0 / n }
+    }
+    /// A photo near `center` (small random offset), like several shots of one event.
+    func shot(_ center: [Float], _ jitter: Float, _ rng: inout SystemRandomNumberGenerator) -> [Float] {
+        unit(center.map { $0 + Float.random(in: -jitter...jitter, using: &rng) })
+    }
+
+    func testGroupsAnEventScatteredAcrossTheLibraryWithoutFaces() {
+        var rng = SystemRandomNumberGenerator()
+        let dim = 64
+        let party = unit((0..<dim).map { _ in Float.random(in: -1...1, using: &rng) })
+        var prints: [String: [Float]] = [:]
+        var order: [String] = []
+        // 200 unrelated photos, with the 5 party photos spread far apart (scanned years apart).
+        for i in 0..<200 {
+            let id = "x\(i)"
+            prints[id] = unit((0..<dim).map { _ in Float.random(in: -1...1, using: &rng) })
+            order.append(id)
+            if i % 40 == 0 {
+                let p = "party\(i / 40)"
+                prints[p] = shot(party, 0.03, &rng)
+                order.append(p)
+            }
+        }
+        let groups = EventClusters.find(order: order, prints: prints)
+        let partyGroup = groups.first { $0.contains("party0") }
+        XCTAssertEqual(Set(partyGroup ?? []), Set((0..<5).map { "party\($0)" }))
+        XCTAssertFalse(groups.contains { g in g.contains { $0.hasPrefix("x") } }, "random photos aren't grouped")
+    }
+
+    func testAChainOfSoSoMatchesDoesNotMergeEverything() {
+        // Each photo is a little different from the last, so ends of the chain are far apart.
+        var prints: [String: [Float]] = [:]
+        var order: [String] = []
+        for i in 0..<30 {
+            let t = Float(i) * 0.06
+            prints["c\(i)"] = unit([cos(t), sin(t), 0, 0])
+            order.append("c\(i)")
+        }
+        let groups = EventClusters.find(order: order, prints: prints)
+        XCTAssertLessThan(groups.map(\.count).max() ?? 0, 30)
+        XCTAssertFalse(groups.contains { $0.contains("c0") && $0.contains("c29") })
+    }
+
+    func testSuggestsLikelyExtraPhotos() {
+        let a = unit([1, 0, 0, 0]), b = unit([1, 0.05, 0, 0])
+        let maybe = unit([1, 0.5, 0.2, 0]), far = unit([0, 1, 0, 0])
+        let extra = EventClusters.candidates(for: ["a", "b"], prints: ["a": a, "b": b, "m": maybe, "f": far])
+        XCTAssertEqual(extra, ["m"])
+    }
+}
+
+final class EventLimitTests: XCTestCase {
+    func testLimitsComeOnlyFromFirmFacts() {
+        let scanned = DateEvidence(source: .libraryDate, summary: "", yearHigh: 1985, weight: 1, isHardConstraint: true)
+        let born = DateEvidence(source: .person, summary: "", yearLow: 1960, weight: 1, isHardConstraint: true)
+        let soft = DateEvidence(source: .colorTone, summary: "", yearLow: 1990, yearHigh: 2000, weight: 0.4)
+        let l = YearLimits([scanned, born, soft])
+        XCTAssertEqual(l.low, 1960)
+        XCTAssertEqual(l.high, 1985)
+    }
+
+    /// Two nearly identical backyard photos: one scanned in 1985, one showing someone born in 1990.
+    func testLookAlikesThatCantBeTheSameDayStayApart() {
+        let p = [Float(1), 0, 0, 0], q = [Float(0.999), 0.04, 0, 0]
+        let norm: ([Float]) -> [Float] = { v in let n = v.map { $0 * $0 }.reduce(0, +).squareRoot(); return v.map { $0 / n } }
+        let prints = ["scan85": norm(p), "nephew": norm(q)]
+        XCTAssertEqual(EventClusters.find(order: ["scan85", "nephew"], prints: prints).count, 1, "alike, so grouped without limits")
+        let limits = ["scan85": YearLimits(high: 1985), "nephew": YearLimits(low: 1990)]
+        XCTAssertTrue(EventClusters.find(order: ["scan85", "nephew"], prints: prints, limits: limits).isEmpty)
+        XCTAssertTrue(EventClusters.candidates(for: ["scan85"], prints: prints, limits: limits).isEmpty)
+    }
+}
+
+final class OverrideMonthTests: XCTestCase {
+    func testAnExactMonthOverridesTheGuess() {
+        let guess = EvidenceFusion.estimate(from: [])
+        let set = guess.overridden(year: 1979, month: 7)
+        XCTAssertEqual(set.year, 1979)
+        XCTAssertEqual(set.month, 7)
+        XCTAssertEqual(set.season, .summer)
+        XCTAssertEqual(set.displayString, "July 1979")
     }
 }

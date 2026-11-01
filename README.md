@@ -37,8 +37,6 @@ Each card shows the thumbnail, the guess (“Summer 1976”), a confidence badge
 
 Double-click a photo for details. Every face Photos detected has a box with its name. **Who’s in this photo?** lists the people tagged there; fill in a missing birth year or how old they look. **Looks like the same event** shows look-alike photos that were dated together, with a button to make them one event.
 
-**Ask Claude to Look Closer** (shown once you add an API key in Settings) sends the photos to Claude for a closer look. It shows the estimated cost first.
-
 **Apply** sets `PHAssetChangeRequest.creationDate` for the checked photos, in batches of 100. This is the same change as *Image ▸ Adjust Date and Time* in Photos:
 
 - The original file is **not** rewritten or replaced.
@@ -59,10 +57,11 @@ Every clue becomes evidence: a year range, how strong the clue is, and sometimes
 | Color & tone | Sepia, black & white, the magenta shift of faded 1960s–80s prints |
 | Border & paper | White print borders, instant-film frames, square 126/Instamatic prints |
 | Scene (on-device Vision) | Santa, Christmas trees and decorations (December), snow and winter sports, pumpkins and costumes (October), Easter eggs and blossoms, beaches and pools |
-| People | Someone can’t be in a photo from before they were born; their age in it (what you enter, or Claude’s estimate) dates it. Photos’ own rough age group for each face (baby, young child, adult) is used too |
+| People | Someone can’t be in a photo from before they were born; their age in it (what you enter) dates it. Photos’ own rough age group for each face (baby, young child, adult) is used too |
 | Look-alike photos | Undated photos that look alike (same scene, clothes or people) are dated together, so a printed date on one photo of a roll helps the others |
 | Your groups and settings | Notes, year ranges, seasons, and “no photos before” (Settings ▸ Dates) |
-| **Claude visual analysis** (optional) | Fashion and clothing, hairstyles, eyeglasses, cars, phones and TVs, architecture and interiors, printed date stamps and photofinisher marks, paper styles, people’s apparent ages |
+| Your dated photos | An undated photo that’s almost identical to a photo with a real date (a scanned print of a dated original) gets that date. A close match counts if the same person is in both. Dates you apply with this app count too, a little less |
+| Apple Intelligence (macOS 27+, optional) | Season and occasion (Christmas, Halloween, Easter, a beach day) from Apple’s on-device model. A gentle hint only; it’s never asked for the year |
 
 The clues are combined statistically, like weighing testimony. Each clue is a mixture: either it’s right (and narrows the year) or it’s noise. Combining them gives a probability for every year since 1830. Strong, specific clues (a printed date stamp, `1985-07-04` in a filename) outweigh vague ones (“black & white”). Clues that agree reinforce each other. The result is:
 
@@ -74,12 +73,12 @@ Some of these were calibrated on a real library of about 190,000 photos:
 - **Look-alikes.** Photos are compared with Vision image fingerprints. Below a distance of 0.5, only 1 in 10,000 pairs from different years matched, against 17% of same-day pairs. Up to 0.7 is still a strong sign.
 - **Face age groups.** Apple doesn’t document Photos’ age groups (`ZAGETYPE`). Following children from infancy across ~87,000 faces: 1 is a baby, 2 a young child (about 1–5), 3 older children through adults, and 5 older adults; 4 is almost never used. This matches the order of the one public mapping (mac4n6.com, 2020). Groups 3 and 5 overlap a lot, so they count only a little.
 
-#### Claude visual analysis
+#### Built in, and private
 
-This is optional and only runs when you click **Ask Claude to Look Closer**, after adding an Anthropic API key in Settings. Each photo (downsized to 1024 px by default) is sent to Claude with its filename, albums, on-device observations, your group notes and any camera years. Photos you grouped go in the same request so they’re judged together. Your people’s reference photos (cropped to the face, picked automatically from dated photos tagged in Photos) are included so Claude can recognize them and estimate their age. Responses are structured JSON with year ranges, a season, any printed date, itemized clues and people sightings.
+Everything runs on your Mac with Apple’s own frameworks: Vision for scenes, faces and image fingerprints, and Apple Intelligence’s on-device model for seasons. Nothing is sent anywhere, and the app doesn’t need the internet.
 
-- Default model: **Claude Opus 5.5**. You can switch to Sonnet 5.5 or Haiku 5.5 (much cheaper for very large batches).
-- The system prompt and reference photos are prompt-cached across requests. Rate limits and server errors are retried with backoff. If Claude can’t analyze a batch, those photos keep their on-device estimate and can be retried later.
+- **Dated look-alikes.** Undated photos are compared with dated photos of the same people (up to 300 per face group, picked from Photos), and with photos you dated here. Only photos with a trustworthy date are used: one with a location, or with a capture date the scan checked. Below a distance of 0.35, none of 15.7 million pairs taken two or more years apart matched, so that’s the cutoff for “the same picture”. A looser match (below 0.5) counts only when the same person is in both.
+- **Apple Intelligence.** Tested on dated phone photos, it was poor at years (it guessed 2015–2019 for nearly everything), so it’s only asked for the season and the occasion. It named a season for about a quarter of photos and was right on about half of those. It takes a few seconds per photo; turn it off in **Settings ▸ Apple Intelligence**.
 
 ## Building
 
@@ -116,24 +115,21 @@ Sources/DateGuessCore/        Pure-Swift logic (unit-tested)
   VisualClues.swift           color, sepia/B&W, borders, aspect; scene → season
   PeopleAndUndated.swift      ages from birthdays and face age groups, undated detection, group suggestions
   EvidenceFusion.swift        combining clues; group fusion
-  EventLinks.swift            look-alike photos from the same event
-  ClaudeDating.swift          Claude request/response, prompt, cost estimate
+  EventLinks.swift            look-alike photos from the same event; matching to dated photos
 Sources/PhotoMetadataGuesser/ The macOS app
   Photos/                     PhotoKit: scanning, header reads, writing dates;
                               reading names and faces from the Photos library; Show in Photos
   Support/                    storage, Keychain, Contacts birthdays
-  Analysis/                   Vision + image stats, estimation pipeline
+  Analysis/                   Vision + image stats, Apple Intelligence, estimation pipeline
   Views/                      SwiftUI screens
 Resources/                    Info.plist, entitlements, app icon
 ```
 
 ## Privacy
 
-- Everything runs on your Mac unless you click **Ask Claude to Look Closer**.
-- When you do, a reduced-size copy of each photo, its filename and album names, your group notes, camera years, and the names, birth years and face crops of your people are sent to Anthropic’s API.
+- Everything runs on your Mac. Nothing is sent anywhere, and the app has no internet access.
 - The Photos library file is only read (names and faces), never changed. Names are only ever added in Photos itself.
 - Contacts are only read, unless you turn on saving birthdays to Contacts in Settings.
-- Your API key is stored in the macOS Keychain.
 - App data (scan results, groups, people, estimates, undo history) lives in the app’s container under Application Support.
 
 ## Limitations
