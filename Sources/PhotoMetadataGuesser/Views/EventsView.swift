@@ -22,7 +22,7 @@ struct EventsView: View {
             } else {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 12) {
-                        Text("These look like they’re from the same event, even if they were scanned years apart. Click a photo that doesn’t belong to leave it out, then click Same Event: they’ll share one date. Know the date? Click Set Date.")
+                        Text("These look like they’re from the same event, even if they were scanned years apart. Click a photo that doesn’t belong to leave it out, then click Same Event: they’ll share one date and be checked in Review & Apply. Know the date? Click Set Date.")
                             .font(.callout)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -75,7 +75,7 @@ struct EventCard: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(kept.count < 2)
-                .help("They’ll share one date, worked out from all their clues together")
+                .help("They’ll share one date, worked out from all their clues together, and be checked for Apply")
             }
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 6) {
@@ -163,7 +163,7 @@ struct EventEditor: View {
                     state.saveEvent(ids, name: name.isEmpty ? "Event (\(ids.count) photos)" : name,
                                     year: year, month: month, season: season)
                     state.banner = year == nil
-                        ? "Saved \(ids.count) photos as one event; they’ll share one date."
+                        ? "Saved \(ids.count) photos as one event with one shared date, and checked them in Review & Apply."
                         : "Dated \(ids.count) photos together and checked them in Review & Apply, ready to apply."
                     dismiss()
                 }

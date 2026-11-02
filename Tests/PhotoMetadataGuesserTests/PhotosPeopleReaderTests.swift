@@ -170,9 +170,21 @@ final class DatedEventTests: XCTestCase {
         XCTAssertEqual(state.decisions["c"]?.selected, false, "a hidden photo isn't checked")
     }
 
-    func testEventWithoutADateChecksNothing() {
+    /// Confirming an event without a date still checks its photos; they keep the shared guess.
+    func testEventWithoutADateChecksItsPhotosWithoutOverriding() {
         let state = AppState()
         state.saveEvent(["a", "b"], name: "Picnic", year: nil, month: nil, season: nil)
-        XCTAssertNil(state.decisions["a"])
+        XCTAssertEqual(state.decisions["a"]?.selected, true)
+        XCTAssertEqual(state.decisions["a"]?.isOverridden, false)
+    }
+
+    func testSettingAMonthKeepsTheYearAndChecksThePhoto() {
+        let state = AppState()
+        state.setOverride("a", year: 1981, season: .winter)
+        state.setMonth("a", 8)
+        XCTAssertEqual(state.decisions["a"]?.overrideYear, 1981)
+        XCTAssertEqual(state.decisions["a"]?.overrideMonth, 8)
+        XCTAssertNil(state.decisions["a"]?.overrideSeason)
+        XCTAssertEqual(state.decisions["a"]?.selected, true)
     }
 }

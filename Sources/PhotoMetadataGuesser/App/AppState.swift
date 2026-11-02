@@ -539,6 +539,15 @@ final class AppState {
         decisions[id] = d
     }
 
+    /// Sets an exact month for one photo (keeping its year), and checks it.
+    func setMonth(_ id: String, _ month: Int) {
+        var d = decision(id)
+        d.overrideMonth = month
+        d.overrideSeason = nil
+        d.selected = true
+        decisions[id] = d
+    }
+
     func setIgnored(_ id: String, _ ignored: Bool) {
         var d = decision(id)
         d.ignored = ignored
@@ -951,20 +960,21 @@ final class AppState {
             group.season = season
         }
         if let i = groups.firstIndex(where: { $0.id == group.id }) { groups[i] = group }
-        // A date the user gave for the event is the date for every photo in it, checked for Apply.
-        if let year {
-            var copy = decisions
-            for id in ids {
-                var d = copy[id] ?? ReviewDecision()
-                guard !d.ignored else { continue }
+        // Confirming an event checks its photos for Apply. A date the user gave is the date for every
+        // photo; without one they keep the event's shared date from all their clues together.
+        var copy = decisions
+        for id in ids {
+            var d = copy[id] ?? ReviewDecision()
+            guard !d.ignored else { continue }
+            if let year {
                 d.overrideYear = year
                 d.overrideMonth = month
                 d.overrideSeason = month == nil ? season : nil
-                d.selected = true
-                copy[id] = d
             }
-            decisions = copy
+            d.selected = true
+            copy[id] = d
         }
+        decisions = copy
         refreshEventSuggestions()
         return group
     }

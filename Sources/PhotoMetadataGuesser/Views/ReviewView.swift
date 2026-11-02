@@ -15,6 +15,8 @@ struct ReviewView: View {
     private var search: String { get { _search.wrappedValue } nonmutating set { _search.wrappedValue = newValue } }
     var _detailID = State<String?>(initialValue: nil)
     private var detailID: String? { get { _detailID.wrappedValue } nonmutating set { _detailID.wrappedValue = newValue } }
+    var _lastClicked = State<String?>(initialValue: nil)
+    private var lastClicked: String? { get { _lastClicked.wrappedValue } nonmutating set { _lastClicked.wrappedValue = newValue } }
     var _confirmApply = State<Bool>(initialValue: false)
     private var confirmApply: Bool { get { _confirmApply.wrappedValue } nonmutating set { _confirmApply.wrappedValue = newValue } }
 
@@ -72,7 +74,7 @@ struct ReviewView: View {
             VStack(alignment: .leading, spacing: 12) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Review and apply").font(.title.weight(.semibold))
-                    Text("Tick the guesses that look right, fix the year if you know better, then click Apply. Double-click a photo to see who’s in it.")
+                    Text("Click the photos whose guess looks right (Shift-click to check a whole run), fix the year if you know better, then click Apply. Click ⓘ on a photo to see who’s in it.")
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -85,7 +87,8 @@ struct ReviewView: View {
             ScrollView {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 240, maximum: 300), spacing: 14, alignment: .top)], spacing: 14) {
                     ForEach(ids, id: \.self) { id in
-                        ReviewCard(assetID: id, onOpen: { detailID = id })
+                        ReviewCard(assetID: id, onOpen: { detailID = id },
+                                   onToggle: { toggle(id, in: ids, extendRange: NSEvent.modifierFlags.contains(.shift)) })
                     }
                 }
                 .padding(.horizontal, 24)
@@ -111,6 +114,18 @@ struct ReviewView: View {
         } message: {
             Text("Only photos without a real date that you checked are changed. Any whose date was changed in Photos since the last scan are skipped. Photos updates each date the same way Image ▸ Adjust Date and Time does: the photos aren’t replaced, and their places, people, albums and edits stay the same. You can undo this from History.")
         }
+    }
+
+    /// Click checks or unchecks one photo; Shift-click sets every photo from the last one clicked to this
+    /// one the same way (like selecting a range of files in Finder).
+    private func toggle(_ id: String, in ids: [String], extendRange: Bool) {
+        let newValue = !state.decision(id).selected
+        if extendRange, let anchor = lastClicked, let a = ids.firstIndex(of: anchor), let b = ids.firstIndex(of: id) {
+            state.select(Array(ids[min(a, b)...max(a, b)]), newValue)
+        } else {
+            state.setSelected(id, newValue)
+        }
+        lastClicked = id
     }
 
     /// What's happening now, and the one or two things that would improve the guesses.
@@ -198,17 +213,28 @@ struct ReviewView: View {
             .frame(minWidth: 120, maxWidth: 200)
     }
 
+    /// The common bulk actions as plain buttons (⌘A checks everything shown), the rest in a menu.
     private func checkMenu(_ ids: [String]) -> some View {
-        Menu("Check…") {
-            Button("Check all \(ids.count.formatted()) shown") { state.select(ids, true) }
-            Button("Check shown with high confidence") {
-                state.select(ids.filter { state.effectiveEstimate($0)?.confidenceLevel == .high }, true)
+        let confident = ids.filter { state.effectiveEstimate($0)?.confidenceLevel == .high }
+        return HStack(spacing: 6) {
+            Button("Check All Shown") { state.select(ids, true) }
+                .keyboardShortcut("a", modifiers: .command)
+                .help("Check all \(ids.count.formatted()) photos shown (⌘A)")
+            Button("Check Confident (\(confident.count.formatted()))") { state.select(confident, true) }
+                .disabled(confident.isEmpty)
+                .help("Check the photos shown whose guess has high confidence")
+            Menu {
+                Button("Check shown with medium or high confidence") {
+                    state.select(ids.filter { state.effectiveEstimate($0)?.confidenceLevel != .low }, true)
+                }
+                Divider()
+                Button("Uncheck all shown") { state.select(ids, false) }
+                    .keyboardShortcut("a", modifiers: [.command, .shift])
+            } label: {
+                Image(systemName: "ellipsis.circle")
             }
-            Button("Check shown with medium or high confidence") {
-                state.select(ids.filter { state.effectiveEstimate($0)?.confidenceLevel != .low }, true)
-            }
-            Divider()
-            Button("Uncheck all shown") { state.select(ids, false) }
+            .menuIndicator(.hidden)
+            .help("More ways to check or uncheck (⇧⌘A unchecks all shown)")
         }
         .fixedSize()
     }
@@ -251,6 +277,8 @@ struct ReviewCard: View {
     @Environment(AppState.self) private var state
     var assetID: String
     var onOpen: () -> Void
+    /// Clicking the picture (or its checkmark) checks or unchecks it.
+    var onToggle: () -> Void = {}
     var _showWhy = State<Bool>(initialValue: false)
     private var showWhy: Bool { get { _showWhy.wrappedValue } nonmutating set { _showWhy.wrappedValue = newValue } }
 
@@ -260,16 +288,26 @@ struct ReviewCard: View {
             let overridden = decision.isOverridden
             VStack(alignment: .leading, spacing: 8) {
                 AssetThumbnail(assetID: assetID, side: .infinity, height: 180)
-                    // Double-click only on the picture itself, so it doesn't delay clicks on the checkbox.
-                    .onTapGesture(count: 2, perform: onOpen)
+                    // A single click checks it: no double-click to wait for, so checking many is quick.
+                    .onTapGesture { if !decision.ignored { onToggle() } }
                     .overlay(alignment: .topLeading) {
-                        Toggle("", isOn: Binding(get: { decision.selected }, set: { state.setSelected(assetID, $0) }))
-                            .toggleStyle(.checkbox)
-                            .labelsHidden()
-                            .padding(5)
-                            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6))
+                        Image(systemName: decision.selected ? "checkmark.circle.fill" : "circle")
+                            .font(.system(size: 24, weight: .semibold))
+                            .foregroundStyle(decision.selected ? Theme.accent : .white, decision.selected ? .white : .clear)
+                            .shadow(color: .black.opacity(0.45), radius: 2)
                             .padding(8)
-                            .disabled(decision.ignored)
+                            .opacity(decision.ignored ? 0.3 : 1)
+                            .allowsHitTesting(false)
+                    }
+                    .overlay(alignment: .topTrailing) {
+                        Button(action: onOpen) {
+                            Image(systemName: "info.circle.fill")
+                                .font(.title3)
+                                .foregroundStyle(.white, .black.opacity(0.45))
+                        }
+                        .buttonStyle(.plain)
+                        .padding(8)
+                        .help("Details, faces and who’s in it")
                     }
                     .overlay(alignment: .bottomTrailing) {
                         if let g = computed.groupName {
@@ -311,11 +349,18 @@ struct ReviewCard: View {
                     }
                     .fixedSize()
                     Menu {
-                        ForEach(Season.allCases) { s in
-                            Button {
-                                state.setOverride(assetID, year: decision.overrideYear, season: s)
-                            } label: {
-                                Label("\(s.displayName) (\(DateEstimate.monthNames[s.representativeMonth - 1]))", systemImage: s.symbolName)
+                        Section("Season") {
+                            ForEach(Season.allCases) { s in
+                                Button {
+                                    state.setOverride(assetID, year: decision.overrideYear, season: s)
+                                } label: {
+                                    Label("\(s.displayName) (\(DateEstimate.monthNames[s.representativeMonth - 1]))", systemImage: s.symbolName)
+                                }
+                            }
+                        }
+                        Section("Month") {
+                            ForEach(1...12, id: \.self) { m in
+                                Button(DateEstimate.monthNames[m - 1]) { state.setMonth(assetID, m) }
                             }
                         }
                         if overridden {
@@ -323,9 +368,11 @@ struct ReviewCard: View {
                             Button("Use the original guess") { state.setOverride(assetID, year: nil, season: nil) }
                         }
                     } label: {
-                        Text(estimate.season.displayName)
+                        // Shows the exact month when there is one, otherwise the season.
+                        Text(estimate.usedExactMonth ? DateEstimate.monthNames[max(1, min(12, estimate.month)) - 1] : estimate.season.displayName)
                     }
                     .fixedSize()
+                    .help("Change the season or the exact month")
                     Spacer()
                     Button("Why?") { showWhy = true }
                         .popover(isPresented: _showWhy.projectedValue, arrowEdge: .bottom) {
