@@ -82,7 +82,7 @@ Everything runs on your Mac with Apple’s own frameworks: Vision for scenes, fa
 
 ## Building
 
-Requirements: macOS 14 Sonoma or later. You also need Apple’s free developer tools; the build script offers to install them if they’re missing.
+Requirements: a Mac with Apple silicon (M1 or later) running macOS 14 Sonoma or later. You also need Apple’s free developer tools; the build script offers to install them if they’re missing.
 
 ### One line
 
