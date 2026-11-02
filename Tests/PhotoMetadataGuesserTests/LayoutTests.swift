@@ -29,28 +29,21 @@ final class LayoutTests: XCTestCase {
     }
 
     func testStepsFitBesideSidebar() {
-        assertFits("Scan", ScanView(goNext: {}))
-        assertFits("People & Groups", KnowView(goNext: {}))
         assertFits("People", PeopleView())
         assertFits("Cameras", CamerasView())
         assertFits("Events", EventsView())
         assertFits("Review", ReviewView())
         assertFits("History", HistoryView())
-        assertFits("Needs scan", NeedsScanView(step: .review, goToScan: {}))
+        assertFits("Scan settings", ScanSettingsView())
     }
 
-    func testGroupsWithEditorFits() {
+    func testGroupSheetFits() {
         let state = AppState()
         let group = PhotoGroup(name: "Grandma and Grandpa’s 50th anniversary party at the lake house",
                                hint: "Probably the summer of 1978, everyone is there")
         state.groups = [group]
-        assertFits("Groups", GroupsView(_selectedGroupID: State(initialValue: group.id)), state: state)
-        // With photos selected, the action bar appears at the bottom too.
-        assertFits("Groups with selection",
-                   GroupsView(_selectedGroupID: State(initialValue: group.id),
-                              _selectedPhotos: State(initialValue: ["a", "b"])),
-                   state: state)
-        assertFits("Groups without a group open", GroupsView(), state: state)
+        assertFits("Group editor", GroupEditor(groupID: group.id), state: state)
+        assertFits("Events with a saved group", EventsView(), state: state)
     }
 
     /// A Review card's photo must fit its grid column; when it overflowed, it covered the next
@@ -61,7 +54,7 @@ final class LayoutTests: XCTestCase {
     }
 
     func testWindowLeavesRoomForSidebarAndSteps() {
-        // Window minimum (1020) must hold the sidebar's ideal width (240) plus the detail minimum.
+        // Window minimum (1020) must hold the sidebar's ideal width (220, checked at 240) plus the detail minimum.
         XCTAssertLessThanOrEqual(240 + maxWidth, 1020)
     }
 }

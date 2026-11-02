@@ -2,41 +2,37 @@ import SwiftUI
 import DateGuessCore
 
 enum SidebarItem: String, CaseIterable, Identifiable {
-    case scan, know, review, history
+    case review, history, events, people, cameras
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
-        case .scan: return "Find Undated Photos"
-        case .know: return "What You Know"
-        case .review: return "Review & Apply"
+        case .review: return "Undated Photos"
         case .history: return "History"
+        case .events: return "Events"
+        case .people: return "People"
+        case .cameras: return "Cameras"
         }
     }
 
     var icon: String {
         switch self {
-        case .scan: return "magnifyingglass"
-        case .know: return "person.2"
-        case .review: return "checkmark.circle"
+        case .review: return "photo.on.rectangle"
         case .history: return "clock.arrow.circlepath"
+        case .events: return "square.stack"
+        case .people: return "person.2"
+        case .cameras: return "camera"
         }
     }
 
-    var step: Int? {
-        switch self {
-        case .scan: return 1
-        case .know: return 2
-        case .review: return 3
-        case .history: return nil
-        }
-    }
+    static let library: [SidebarItem] = [.review, .history]
+    static let clues: [SidebarItem] = [.events, .people, .cameras]
 }
 
 struct ContentView: View {
     @Environment(AppState.self) private var state
-    var _selection = State<SidebarItem?>(initialValue: .scan)
+    var _selection = State<SidebarItem?>(initialValue: .review)
     private var selection: SidebarItem? { get { _selection.wrappedValue } nonmutating set { _selection.wrappedValue = newValue } }
     var _columnVisibility = State<NavigationSplitViewVisibility>(initialValue: .all)
     private var columnVisibility: NavigationSplitViewVisibility { get { _columnVisibility.wrappedValue } nonmutating set { _columnVisibility.wrappedValue = newValue } }
@@ -49,10 +45,11 @@ struct ContentView: View {
                 } detail: {
                     detail
                         // A fixed minimum keeps any screen's content from forcing the sidebar
-                        // to collapse (which left no way back to the other steps).
+                        // to collapse (which left no way back to the other screens).
                         .frame(minWidth: Self.detailMinWidth, maxWidth: .infinity, maxHeight: .infinity)
-                        .clipped()
-                        .background(Theme.background)
+                        .toolbar {
+                            ToolbarItem(placement: .navigation) { ScanButton() }
+                        }
                 }
                 .onChange(of: selection) { _, _ in columnVisibility = .all }
                 .sheet(isPresented: Binding(
@@ -73,105 +70,122 @@ struct ContentView: View {
 
     private var sidebar: some View {
         List(selection: _selection.projectedValue) {
-            VStack(spacing: 6) {
-                Image(nsImage: NSApp.applicationIconImage)
-                    .resizable()
-                    .frame(width: 72, height: 72)
-                Text("Photo Date Guesser")
-                    .font(.headline)
-                Text("Finding when your memories happened")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
+            Section("Library") {
+                ForEach(SidebarItem.library) { row($0) }
             }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 10)
-            .selectionDisabled()
-
-            Section("Steps") {
-                ForEach(SidebarItem.allCases.filter { $0.step != nil }) { item in
-                    NavigationLink(value: item) {
-                        Label {
-                            Text(item.title)
-                        } icon: {
-                            Image(systemName: item.icon)
-                        }
-                        .badge(badge(for: item))
-                    }
-                }
-            }
-            Section {
-                NavigationLink(value: SidebarItem.history) {
-                    Label(SidebarItem.history.title, systemImage: SidebarItem.history.icon)
-                }
+            Section("Clues") {
+                ForEach(SidebarItem.clues) { row($0) }
             }
         }
-        .navigationSplitViewColumnWidth(min: 220, ideal: 240)
+        .navigationSplitViewColumnWidth(min: 200, ideal: 220)
+        .safeAreaInset(edge: .bottom, spacing: 0) { ActivityFooter() }
+    }
+
+    private func row(_ item: SidebarItem) -> some View {
+        NavigationLink(value: item) {
+            Label(item.title, systemImage: item.icon)
+                .badge(badge(for: item))
+        }
     }
 
     private func badge(for item: SidebarItem) -> Int {
         switch item {
-        case .scan: return state.undatedSorted.count
-        case .know: return state.people.count + state.groups.count
-        case .review: return state.selectedForApply.count
-        case .history: return 0
+        case .review: return state.undatedSorted.count
+        case .events: return state.eventSuggestions.count
+        case .people: return state.people.count
+        case .history, .cameras: return 0
         }
     }
 
     static let detailMinWidth: CGFloat = 640
 
-    /// Steps that only make sense after a scan.
-    private func needsScan(_ item: SidebarItem) -> Bool {
-        state.scan.lastScan == nil && item == .review
-    }
-
     @ViewBuilder private var detail: some View {
-        let item = selection ?? .scan
-        if needsScan(item) {
-            NeedsScanView(step: item, goToScan: { selection = .scan })
-        } else {
-            stepView(item)
+        let item = selection ?? .review
+        Group {
+            switch item {
+            case .review: ReviewView(goToPeople: { selection = .people })
+            case .history: HistoryView()
+            case .events: EventsView()
+            case .people: PeopleView()
+            case .cameras: CamerasView()
+            }
         }
-    }
-
-    @ViewBuilder private func stepView(_ item: SidebarItem) -> some View {
-        switch item {
-        case .scan: ScanView(goNext: { selection = .review })
-        case .know: KnowView(goNext: { selection = .review })
-        case .review: ReviewView(goToKnow: { selection = .know })
-        case .history: HistoryView()
-        }
+        .navigationTitle(item.title)
     }
 }
 
-/// Shown when a later step is opened before the library has been scanned.
-struct NeedsScanView: View {
-    var step: SidebarItem
-    var goToScan: () -> Void
+/// The bottom of the sidebar: what the app is doing right now, like the activity line in Photos or Mail.
+struct ActivityFooter: View {
+    @Environment(AppState.self) private var state
+    var _showSummary = State<Bool>(initialValue: false)
+    private var showSummary: Bool { get { _showSummary.wrappedValue } nonmutating set { _showSummary.wrappedValue = newValue } }
 
     var body: some View {
-        VStack(spacing: 16) {
-            Image(systemName: step.icon)
-                .font(.system(size: 44, weight: .semibold))
-                .foregroundStyle(Theme.accent)
-            Text("Let’s find your undated photos first")
-                .font(.title.weight(.semibold))
-            Text("“\(step.title)” works with the photos the scan finds. Start with step 1 — you can come back here any time.")
-                .font(.title3)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: 480)
-            Button {
-                goToScan()
-            } label: {
-                Label("Go to Step 1: Find Undated Photos", systemImage: "magnifyingglass")
-                    .padding(.horizontal, 8)
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
+        VStack(alignment: .leading, spacing: 6) {
+            content
         }
-        .padding(40)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+    }
+
+    @ViewBuilder private var content: some View {
+        if let p = state.scanProgress {
+            progress(p.phase, p.fraction, p.total > 0 ? "\(p.done.formatted()) of \(p.total.formatted()) · \(p.found.formatted()) undated" : nil) {
+                state.cancelScan()
+            }
+        } else if let p = state.applyProgress {
+            progress("Updating dates…", Double(p.done) / Double(max(1, p.total)), "\(p.done.formatted()) of \(p.total.formatted())", stop: nil)
+        } else if state.isEstimating, let p = state.estimationProgress {
+            progress(p.phase, p.fraction, "\(p.done.formatted()) of \(p.total.formatted())") {
+                state.cancelEstimation()
+            }
+        } else if state.settings.backgroundPaused == true {
+            HStack {
+                Text("Analysis stopped · \(state.backgroundWorkLeft.formatted()) left")
+                Spacer(minLength: 4)
+                Button("Resume") { state.resumeBackgroundWork() }
+                    .controlSize(.small)
+            }
+        } else if let last = state.scan.lastScan {
+            HStack(spacing: 4) {
+                Text("Scanned \(last.formatted(.dateTime.month(.abbreviated).day())) · \(state.undatedSorted.count.formatted()) undated")
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                Button {
+                    showSummary = true
+                } label: {
+                    Image(systemName: "info.circle")
+                }
+                .buttonStyle(.borderless)
+                .help("What the last scan found")
+                .popover(isPresented: _showSummary.projectedValue, arrowEdge: .trailing) {
+                    ScanSummary().padding(16).frame(width: 380)
+                }
+            }
+        } else {
+            Text("Not scanned yet")
+        }
+    }
+
+    private func progress(_ phase: String, _ fraction: Double, _ detail: String?, stop: (() -> Void)?) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(phase).lineLimit(2)
+            HStack(spacing: 6) {
+                ProgressView(value: fraction)
+                    .controlSize(.small)
+                if let stop {
+                    Button(action: stop) {
+                        Image(systemName: "stop.circle.fill")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Stop")
+                }
+            }
+            if let detail { Text(detail).monospacedDigit() }
+        }
     }
 }
 
@@ -182,16 +196,15 @@ struct WelcomeView: View {
         VStack(spacing: 22) {
             Image(nsImage: NSApp.applicationIconImage)
                 .resizable()
-                .frame(width: 160, height: 160)
-                .shadow(color: .black.opacity(0.12), radius: 12, y: 6)
-            Text("Hi! Let’s find the dates of your old photos.")
-                .font(.largeTitle.weight(.semibold))
+                .frame(width: 128, height: 128)
+            Text("Find the dates of your old photos")
+                .font(.largeTitle.weight(.bold))
                 .multilineTextAlignment(.center)
-            Text("Photo Date Guesser looks through your Photos library for pictures that don’t have a real date — like scanned prints — and makes a careful guess for each one. You review every guess before anything changes.")
+            Text("Photo Date Guesser finds photos without a real date, like scanned prints, and guesses when each was taken. You review every guess before anything changes.")
                 .font(.title3)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
-                .frame(maxWidth: 620)
+                .frame(maxWidth: 520)
             if state.authorization == .denied || state.authorization == .restricted {
                 VStack(spacing: 8) {
                     Text("Photos access is turned off for this app.")
@@ -208,9 +221,8 @@ struct WelcomeView: View {
                 Button {
                     Task { await state.requestAccess() }
                 } label: {
-                    Label("Allow Access to Photos", systemImage: "photo.on.rectangle.angled")
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 4)
+                    Text("Allow Access to Photos")
+                        .padding(.horizontal, 8)
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
@@ -231,8 +243,8 @@ struct BannerView: View {
     var body: some View {
         if let text = state.banner {
             HStack(spacing: 10) {
-                Image(systemName: "sparkle")
-                    .foregroundStyle(Theme.accent)
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(.tint)
                 Text(text)
                     .lineLimit(3)
                 Button {
@@ -274,7 +286,7 @@ struct SetupView: View {
         HStack(spacing: 14) {
             Image(systemName: icon)
                 .font(.system(size: 34))
-                .foregroundStyle(Theme.accent)
+                .foregroundStyle(.tint)
             VStack(alignment: .leading, spacing: 4) {
                 Text(title).font(.title2.weight(.semibold))
                 Text(subtitle).foregroundStyle(.secondary)
@@ -299,7 +311,7 @@ struct SetupView: View {
                 .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.defaultAction)
             }
-            Text("You can also do this later from What You Know ▸ People ▸ Import from Photos.")
+            Text("You can also do this later from People ▸ Update from Photos.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -322,7 +334,7 @@ struct SetupView: View {
                 .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.defaultAction)
             }
-            Text("You can also do this later from What You Know ▸ People ▸ Birthdays from Contacts.")
+            Text("You can also do this later from People ▸ Birthdays from Contacts.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }

@@ -1,9 +1,72 @@
 import SwiftUI
 import DateGuessCore
 
-struct ScanView: View {
+/// The toolbar's Scan button. Once the app has dated photos, its menu can include them again.
+struct ScanButton: View {
     @Environment(AppState.self) private var state
-    var goNext: () -> Void
+
+    var body: some View {
+        let title = state.scan.lastScan == nil ? "Scan Library" : "Scan Again"
+        Group {
+            if state.appliedIDs.isEmpty {
+                Button {
+                    state.startScan()
+                } label: {
+                    Label(title, systemImage: "magnifyingglass")
+                }
+            } else {
+                Menu {
+                    Button("Scan Again, Including Photos I Dated Here") { state.startScan(includeApplied: true) }
+                } label: {
+                    Label(title, systemImage: "magnifyingglass")
+                } primaryAction: {
+                    state.startScan()
+                }
+            }
+        }
+        .disabled(state.isScanning)
+        .help("Look through your library for photos without a real date. Photos you already dated here are skipped.")
+    }
+}
+
+/// What the last scan found, by reason.
+struct ScanSummary: View {
+    @Environment(AppState.self) private var state
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if let last = state.scan.lastScan {
+                Text("\(state.undatedSorted.count.formatted()) photos need a date").font(.headline)
+                Text("Checked \(state.scan.totalAssets.formatted()) photos on \(last.formatted(date: .abbreviated, time: .shortened))."
+                     + (state.appliedIDs.isEmpty ? "" : " \(state.appliedIDs.count.formatted()) you already dated here are skipped."))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Divider()
+                let counts = Dictionary(grouping: state.undatedSorted, by: \.reason).mapValues(\.count)
+                ForEach(UndatedReason.allCases, id: \.self) { reason in
+                    if let n = counts[reason] {
+                        HStack(alignment: .firstTextBaseline) {
+                            Text(reason.explanation).fixedSize(horizontal: false, vertical: true)
+                            Spacer()
+                            Text(n.formatted()).monospacedDigit().foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                if state.scan.unverifiableCount > 0 {
+                    Label("\(state.scan.unverifiableCount.formatted()) photos couldn’t be checked because their originals are only in iCloud. Turn on downloads in Settings ▸ Scanning to include them.",
+                          systemImage: "icloud")
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+        .font(.callout)
+    }
+}
+
+/// Settings ▸ Scanning: what counts as undated, albums of scans, and scanning sessions.
+struct ScanSettingsView: View {
+    @Environment(AppState.self) private var state
 
     var _albumSearch = State<String>(initialValue: "")
     private var albumSearch: String { get { _albumSearch.wrappedValue } nonmutating set { _albumSearch.wrappedValue = newValue } }
@@ -14,192 +77,80 @@ struct ScanView: View {
     var _newRuleEnd = State<Date>(initialValue: Date())
     private var newRuleEnd: Date { get { _newRuleEnd.wrappedValue } nonmutating set { _newRuleEnd.wrappedValue = newValue } }
 
-    var _showOptions = State<Bool>(initialValue: false)
-    private var showOptions: Bool { get { _showOptions.wrappedValue } nonmutating set { _showOptions.wrappedValue = newValue } }
-
     var body: some View {
         @Bindable var state = state
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                StepHeader(step: 1, title: "Find photos without a date",
-                           subtitle: "We look through your library for photos without a real date, like scanned prints, and guess a date for each one. Nothing changes until you apply.",
-                           systemImage: "magnifyingglass")
-
-                scanCard
-
-                DisclosureGroup(isExpanded: _showOptions.projectedValue) {
-                    VStack(alignment: .leading, spacing: 18) {
-                        optionsCard
-                        albumsCard
-                        rulesCard
-                    }
-                    .padding(.top, 10)
-                } label: {
-                    Text("Options: what counts as undated, scan albums, scanning sessions")
-                        .font(.headline)
+        Form {
+            Section {
+                Toggle("Photos whose file has no capture date", isOn: $state.settings.scan.deepCheck)
+                Group {
+                    Toggle("Trust photos that have a location", isOn: $state.settings.scan.skipGPSTagged)
+                    Toggle("Download originals from iCloud when needed", isOn: $state.settings.scan.allowICloudDownloads)
                 }
+                .disabled(!state.settings.scan.deepCheck)
+                Toggle("Include screenshots", isOn: $state.settings.scan.includeScreenshots)
+            } header: {
+                Text("What counts as undated")
+            } footer: {
+                Text("Photos with no date, an impossible date or a camera’s factory date (like Jan 1, 1970) always count. Scans usually carry the day they were scanned; the app reads the top of each file to tell. Photos with a location come from phones and GPS cameras, which keep good dates. Downloading from iCloud is slow.")
             }
-            .padding(28)
-            .frame(maxWidth: 900, alignment: .leading)
-        }
-    }
 
-    private var optionsCard: some View {
-        @Bindable var state = state
-        return Card(title: "What counts as “undated”?", systemImage: "questionmark.circle") {
-                    Toggle(isOn: .constant(true)) {
-                        Text("Photos with no date, an impossible date, or a camera’s factory-default date (like Jan 1, 1970)")
-                    }
-                    .disabled(true)
-                    Toggle(isOn: $state.settings.scan.deepCheck) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Photos whose file has no capture date")
-                            Text("Scans and imported files get the date they were scanned or imported. We read just the top of each file to tell — nothing is changed.")
-                                .font(.caption).foregroundStyle(.secondary)
+            Section {
+                if state.albums.isEmpty {
+                    Text("No albums found.").foregroundStyle(.secondary)
+                } else {
+                    TextField("Search albums", text: _albumSearch.projectedValue)
+                    let filtered = state.albums.filter { albumSearch.isEmpty || $0.title.localizedCaseInsensitiveContains(albumSearch) }
+                    ForEach(filtered) { album in
+                        Toggle(isOn: albumBinding(album.id)) {
+                            HStack {
+                                Text(album.title)
+                                Spacer()
+                                Text(album.count.formatted()).foregroundStyle(.secondary).monospacedDigit()
+                            }
                         }
                     }
-                    Group {
-                        Toggle("Trust photos that have a GPS location (phones and GPS cameras keep good dates)", isOn: $state.settings.scan.skipGPSTagged)
-                        Toggle("Download originals from iCloud when they aren’t on this Mac (slow; uses bandwidth)", isOn: $state.settings.scan.allowICloudDownloads)
-                    }
-                    .disabled(!state.settings.scan.deepCheck)
-                    .padding(.leading, 20)
-                    Toggle("Include screenshots", isOn: $state.settings.scan.includeScreenshots)
                 }
-    }
+            } header: {
+                Text("Albums of scans")
+            } footer: {
+                Text("Every photo in a checked album counts as undated, even if the scanner gave it a date.")
+            }
 
-    // MARK: Scan card
-
-    private var scanCard: some View {
-        Card {
-            if let p = state.scanProgress {
-                VStack(alignment: .leading, spacing: 8) {
+            Section {
+                ForEach(state.settings.scan.dateRangeRules) { rule in
                     HStack {
-                        Text(p.phase).font(.headline)
+                        Text(rule.label)
                         Spacer()
-                        Button("Stop") { state.cancelScan() }
-                    }
-                    ProgressView(value: p.fraction)
-                    HStack {
-                        if p.total > 0 { Text("\(p.done.formatted()) of \(p.total.formatted())") }
-                        Spacer()
-                        Text("\(p.found.formatted()) need a date so far")
-                    }
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                }
-            } else {
-                HStack(alignment: .center, spacing: 16) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        if let last = state.scan.lastScan {
-                            Text("\(state.undatedSorted.count.formatted()) photos need a date")
-                                .font(.title2.weight(.semibold))
-                            Text("Checked \(state.scan.totalAssets.formatted()) photos on \(last.formatted(date: .abbreviated, time: .shortened))."
-                                 + (state.appliedIDs.isEmpty ? "" : " \(state.appliedIDs.count.formatted()) you already dated here are skipped."))
-                                .foregroundStyle(.secondary)
-                        } else {
-                            Text("Ready when you are")
-                                .font(.title2.weight(.semibold))
-                            Text("A first scan of a very large library can take a while. You can stop and come back — checked photos are remembered.")
-                                .foregroundStyle(.secondary)
+                        Text("\(rule.start.shortDay) – \(rule.end.shortDay)").foregroundStyle(.secondary)
+                        Button(role: .destructive) {
+                            state.settings.scan.dateRangeRules.removeAll { $0.id == rule.id }
+                        } label: {
+                            Image(systemName: "minus.circle")
                         }
+                        .buttonStyle(.borderless)
+                        .help("Remove")
                     }
+                }
+                TextField("Name", text: _newRuleLabel.projectedValue)
+                DatePicker("From", selection: _newRuleStart.projectedValue, displayedComponents: .date)
+                DatePicker("To", selection: _newRuleEnd.projectedValue, displayedComponents: .date)
+                HStack {
                     Spacer()
-                    if state.scan.lastScan == nil || state.appliedIDs.isEmpty {
-                        Button {
-                            state.startScan()
-                        } label: {
-                            Label(state.scan.lastScan == nil ? "Scan Library" : "Scan Again", systemImage: "magnifyingglass")
-                                .padding(.horizontal, 8)
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.large)
-                    } else {
-                        Menu {
-                            Button("Scan Again, Including Photos I Dated Here") { state.startScan(includeApplied: true) }
-                        } label: {
-                            Label("Scan Again", systemImage: "magnifyingglass")
-                        } primaryAction: {
-                            state.startScan()
-                        }
-                        .menuStyle(.button)
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.large)
-                        .fixedSize()
-                        .help("Photos you already dated with this app are skipped. Use the arrow to include them.")
-                    }
-                    if !state.undatedSorted.isEmpty {
-                        Button("See the Guesses", action: goNext)
-                            .controlSize(.large)
+                    Button("Add Session") {
+                        let cal = Calendar.current
+                        let start = cal.startOfDay(for: min(newRuleStart, newRuleEnd))
+                        let endDay = cal.startOfDay(for: max(newRuleStart, newRuleEnd))
+                        let end = cal.date(byAdding: DateComponents(day: 1, second: -1), to: endDay) ?? endDay
+                        state.settings.scan.dateRangeRules.append(DateRangeRule(label: newRuleLabel, start: start, end: end))
                     }
                 }
-                if state.scan.lastScan != nil {
-                    resultsSummary
-                }
+            } header: {
+                Text("Scanning sessions")
+            } footer: {
+                Text("Scanned a box of prints over a weekend? Add those days, and anything dated within them counts as undated.")
             }
         }
-    }
-
-    private var resultsSummary: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Divider()
-            let counts = Dictionary(grouping: state.undatedSorted, by: \.reason).mapValues(\.count)
-            ForEach(UndatedReason.allCases, id: \.self) { reason in
-                if let n = counts[reason] {
-                    HStack {
-                        Text(reason.explanation)
-                        Spacer()
-                        Text(n.formatted()).monospacedDigit().foregroundStyle(.secondary)
-                    }
-                }
-            }
-            if state.scan.unverifiableCount > 0 {
-                Label("\(state.scan.unverifiableCount.formatted()) photos couldn’t be checked because their originals are only in iCloud. Turn on “Download originals from iCloud” below to include them.",
-                      systemImage: "icloud")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-            }
-            if !state.undatedSorted.isEmpty {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    LazyHStack(spacing: 8) {
-                        ForEach(state.undatedSorted.prefix(40)) { photo in
-                            AssetThumbnail(assetID: photo.id, side: 72, cornerRadius: 8)
-                                .help(photo.filename)
-                        }
-                    }
-                }
-                .frame(height: 76)
-            }
-        }
-    }
-
-    // MARK: Albums
-
-    private var albumsCard: some View {
-        Card(title: "Albums that are all undated (optional)", systemImage: "rectangle.stack") {
-            Text("If you keep scans in albums like “Shoebox scans”, tick them and every photo inside will be treated as undated — even if it has a date from the scanner.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-            if state.albums.isEmpty {
-                Text("No albums found.").foregroundStyle(.secondary)
-            } else {
-                TextField("Search albums", text: _albumSearch.projectedValue)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(maxWidth: 300)
-                let filtered = state.albums.filter { albumSearch.isEmpty || $0.title.localizedCaseInsensitiveContains(albumSearch) }
-                List(filtered) { album in
-                    Toggle(isOn: albumBinding(album.id)) {
-                        HStack {
-                            Text(album.title)
-                            Spacer()
-                            Text(album.count.formatted()).foregroundStyle(.secondary).monospacedDigit()
-                        }
-                    }
-                }
-                .frame(height: 200)
-                .clipShape(RoundedRectangle(cornerRadius: 8))
-            }
-        }
+        .formStyle(.grouped)
     }
 
     private func albumBinding(_ id: String) -> Binding<Bool> {
@@ -210,45 +161,5 @@ struct ScanView: View {
                 if on { ids.append(id) }
                 state.settings.scan.undatedAlbumIDs = ids
             })
-    }
-
-    // MARK: Date-range rules
-
-    private var rulesCard: some View {
-        Card(title: "Scanning sessions (optional)", systemImage: "calendar.badge.exclamationmark") {
-            Text("Scanned a box of prints over a weekend? Add those days here and anything dated within them is treated as undated.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-            ForEach(state.settings.scan.dateRangeRules) { rule in
-                HStack {
-                    Image(systemName: "calendar")
-                    Text(rule.label).fontWeight(.medium)
-                    Text("\(rule.start.shortDay) – \(rule.end.shortDay)").foregroundStyle(.secondary)
-                    Spacer()
-                    Button(role: .destructive) {
-                        state.settings.scan.dateRangeRules.removeAll { $0.id == rule.id }
-                    } label: {
-                        Image(systemName: "trash")
-                    }
-                    .buttonStyle(.borderless)
-                }
-            }
-            TextField("Label", text: _newRuleLabel.projectedValue)
-                .textFieldStyle(.roundedBorder)
-                .frame(maxWidth: 260)
-            HStack {
-                DatePicker("From", selection: _newRuleStart.projectedValue, displayedComponents: .date)
-                    .fixedSize()
-                DatePicker("To", selection: _newRuleEnd.projectedValue, displayedComponents: .date)
-                    .fixedSize()
-                Button("Add") {
-                    let cal = Calendar.current
-                    let start = cal.startOfDay(for: min(newRuleStart, newRuleEnd))
-                    let endDay = cal.startOfDay(for: max(newRuleStart, newRuleEnd))
-                    let end = cal.date(byAdding: DateComponents(day: 1, second: -1), to: endDay) ?? endDay
-                    state.settings.scan.dateRangeRules.append(DateRangeRule(label: newRuleLabel, start: start, end: end))
-                }
-            }
-        }
     }
 }

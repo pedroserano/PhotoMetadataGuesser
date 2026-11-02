@@ -3,7 +3,7 @@ import DateGuessCore
 
 struct ReviewView: View {
     @Environment(AppState.self) private var state
-    var goToKnow: () -> Void = {}
+    var goToPeople: () -> Void = {}
 
     var _filter = State<Filter>(initialValue: .toReview)
     private var filter: Filter { get { _filter.wrappedValue } nonmutating set { _filter.wrappedValue = newValue } }
@@ -70,41 +70,43 @@ struct ReviewView: View {
     var body: some View {
         let ids = visibleIDs
         let selectedCount = state.selectedForApply.count
-        VStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 12) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Review and apply").font(.title.weight(.semibold))
-                    Text("Click the photos whose guess looks right (Shift-click to check a whole run), fix the year if you know better, then click Apply. Click ⓘ on a photo to see who’s in it.")
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+        ScrollView {
+            if state.people.isEmpty && !state.estimates.isEmpty {
+                HStack(spacing: 8) {
+                    Image(systemName: "person.2").foregroundStyle(.secondary)
+                    Text("Birth years make guesses much better.").foregroundStyle(.secondary)
+                    Button("Add People") { goToPeople() }
+                        .buttonStyle(.link)
+                    Spacer()
                 }
-                statusStrip
-                toolbar(ids)
+                .font(.callout)
+                .padding(.horizontal, 20)
+                .padding(.top, 12)
             }
-            .padding([.horizontal, .top], 24)
-            .padding(.bottom, 12)
-
-            ScrollView {
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 240, maximum: 300), spacing: 14, alignment: .top)], spacing: 14) {
-                    ForEach(ids, id: \.self) { id in
-                        ReviewCard(assetID: id, onOpen: { detailID = id },
-                                   onToggle: { toggle(id, in: ids, extendRange: NSEvent.modifierFlags.contains(.shift)) })
-                    }
-                }
-                .padding(.horizontal, 24)
-                .padding(.bottom, 90)
-            }
-            .overlay {
-                if state.estimates.isEmpty {
-                    ContentUnavailableView(state.isEstimating ? "Guessing dates…" : "Nothing to review yet", systemImage: "sparkles",
-                                           description: Text(state.isEstimating ? "The first guesses show up here in a moment." : "Scan your library first."))
-                } else if ids.isEmpty {
-                    ContentUnavailableView("No photos match", systemImage: "line.3.horizontal.decrease.circle",
-                                           description: Text("Try a different filter."))
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 200, maximum: 260), spacing: 16, alignment: .top)], spacing: 20) {
+                ForEach(ids, id: \.self) { id in
+                    ReviewCard(assetID: id, onOpen: { detailID = id },
+                               onToggle: { toggle(id, in: ids, extendRange: NSEvent.modifierFlags.contains(.shift)) })
                 }
             }
+            .padding(20)
         }
-        .safeAreaInset(edge: .bottom) { applyBar(selectedCount) }
+        .overlay { emptyState(ids) }
+        // Menu items' shortcuts only work while the menu is open, so these keep ⌘A and ⇧⌘A working.
+        .background {
+            Group {
+                Button("Check All Shown") { state.select(ids, true) }
+                    .keyboardShortcut("a", modifiers: .command)
+                Button("Uncheck All Shown") { state.select(ids, false) }
+                    .keyboardShortcut("a", modifiers: [.command, .shift])
+            }
+            .opacity(0)
+            .frame(width: 0, height: 0)
+            .accessibilityHidden(true)
+        }
+        .searchable(text: _search.projectedValue, placement: .toolbar, prompt: "Filenames or albums")
+        .navigationSubtitle(selectedCount > 0 ? "\(selectedCount.formatted()) checked" : "\(ids.count.formatted()) photos")
+        .toolbar { toolbarItems(ids, selectedCount) }
         .sheet(item: Binding(get: { detailID.map(IdentifiedString.init) }, set: { detailID = $0?.id })) { item in
             PhotoDetailSheet(assetID: item.id)
         }
@@ -113,6 +115,56 @@ struct ReviewView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("Only photos without a real date that you checked are changed. Any whose date was changed in Photos since the last scan are skipped. Photos updates each date the same way Image ▸ Adjust Date and Time does: the photos aren’t replaced, and their places, people, albums and edits stay the same. You can undo this from History.")
+        }
+    }
+
+    @ViewBuilder private func emptyState(_ ids: [String]) -> some View {
+        if state.scan.lastScan == nil && !state.isScanning {
+            ContentUnavailableView {
+                Label("Find Your Undated Photos", systemImage: "photo.on.rectangle.angled")
+            } description: {
+                Text("The app looks for photos without a real date, like scanned prints, and guesses when each was taken. Nothing changes until you apply.")
+            } actions: {
+                Button("Scan Library") { state.startScan() }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+            }
+        } else if state.estimates.isEmpty {
+            ContentUnavailableView {
+                Label(state.isScanning ? "Scanning Your Library…" : state.isEstimating ? "Guessing Dates…" : "Nothing to Review", systemImage: "sparkles")
+            } description: {
+                Text(state.isScanning || state.isEstimating ? "The first guesses show up here in a moment." : "No undated photos were found.")
+            }
+        } else if ids.isEmpty {
+            if search.isEmpty {
+                ContentUnavailableView("No Photos", systemImage: "line.3.horizontal.decrease.circle",
+                                       description: Text("Nothing matches “\(filter.rawValue)”."))
+            } else {
+                ContentUnavailableView.search(text: search)
+            }
+        }
+    }
+
+    @ToolbarContentBuilder
+    private func toolbarItems(_ ids: [String], _ selectedCount: Int) -> some ToolbarContent {
+        ToolbarItem(placement: .principal) {
+            Picker("Show", selection: _filter.projectedValue) {
+                ForEach(Filter.allCases) { Text($0.rawValue).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .fixedSize()
+        }
+        ToolbarItemGroup(placement: .primaryAction) {
+            sortMenu
+            checkMenu(ids)
+            Button {
+                confirmApply = true
+            } label: {
+                Text(selectedCount == 0 ? "Apply" : "Apply \(selectedCount.formatted())")
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(selectedCount == 0 || state.isApplying)
+            .help("Set the checked photos’ dates in Photos")
         }
     }
 
@@ -128,144 +180,40 @@ struct ReviewView: View {
         lastClicked = id
     }
 
-    /// What's happening now, and the one or two things that would improve the guesses.
-    @ViewBuilder private var statusStrip: some View {
-        if state.isEstimating, let p = state.estimationProgress {
-            HStack(spacing: 12) {
-                ProgressView(value: p.fraction).frame(maxWidth: 200)
-                Text("\(p.phase) \(p.done.formatted()) of \(p.total.formatted())")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                Spacer(minLength: 8)
-                Button("Stop") { state.cancelEstimation() }
-            }
-        } else if state.settings.backgroundPaused == true {
-            HStack(spacing: 12) {
-                Label("Background analysis is stopped (\(state.backgroundWorkLeft.formatted()) photos left).", systemImage: "pause.circle")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                Spacer(minLength: 8)
-                Button("Resume") { state.resumeBackgroundWork() }
-            }
-        } else if state.people.isEmpty {
-            HStack(spacing: 12) {
-                Button {
-                    goToKnow()
-                } label: {
-                    Label("Add People & Birthdays", systemImage: "person.badge.plus")
-                }
-                Spacer(minLength: 0)
-            }
-            .controlSize(.small)
-        }
-    }
-
-    /// Filters on one row when there's room, two rows when the window is narrow.
-    private func toolbar(_ ids: [String]) -> some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 10) {
-                filterControls
-                searchField
-                Spacer(minLength: 8)
-                checkMenu(ids)
-            }
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 10) {
-                    filterControls
-                    Spacer(minLength: 0)
-                }
-                HStack(spacing: 10) {
-                    searchField
-                    Spacer(minLength: 8)
-                    checkMenu(ids)
-                }
-            }
-        }
-    }
-
-    @ViewBuilder private var filterControls: some View {
-        Picker("Show", selection: _filter.projectedValue) {
-            ForEach(Filter.allCases) { Text($0.rawValue).tag($0) }
-        }
-        .pickerStyle(.segmented)
-        .labelsHidden()
-        .fixedSize()
+    private var sortMenu: some View {
         Menu {
-            Picker("Sort", selection: _sort.projectedValue) {
+            Picker("Sort By", selection: _sort.projectedValue) {
                 ForEach(Sort.allCases) { Text($0.rawValue).tag($0) }
             }
+            .pickerStyle(.inline)
             if !state.groups.isEmpty {
-                Picker("Group", selection: _groupFilter.projectedValue) {
-                    Text("All photos").tag(UUID?.none)
+                Picker("Event or Group", selection: _groupFilter.projectedValue) {
+                    Text("All Photos").tag(UUID?.none)
                     ForEach(state.groups) { g in Text(g.name).tag(UUID?.some(g.id)) }
                 }
             }
         } label: {
             Label("Sort", systemImage: "arrow.up.arrow.down")
         }
-        .fixedSize()
+        .help("Sort, or show one event or group")
     }
 
-    private var searchField: some View {
-        TextField("Search", text: _search.projectedValue)
-            .textFieldStyle(.roundedBorder)
-            .frame(minWidth: 120, maxWidth: 200)
-    }
-
-    /// The common bulk actions as plain buttons (⌘A checks everything shown), the rest in a menu.
+    /// Bulk checking: ⌘A checks everything shown, ⇧⌘A unchecks it.
     private func checkMenu(_ ids: [String]) -> some View {
         let confident = ids.filter { state.effectiveEstimate($0)?.confidenceLevel == .high }
-        return HStack(spacing: 6) {
-            Button("Check All Shown") { state.select(ids, true) }
-                .keyboardShortcut("a", modifiers: .command)
-                .help("Check all \(ids.count.formatted()) photos shown (⌘A)")
+        return Menu {
+            Button("Check All Shown  ⌘A") { state.select(ids, true) }
             Button("Check Confident (\(confident.count.formatted()))") { state.select(confident, true) }
                 .disabled(confident.isEmpty)
-                .help("Check the photos shown whose guess has high confidence")
-            Menu {
-                Button("Check shown with medium or high confidence") {
-                    state.select(ids.filter { state.effectiveEstimate($0)?.confidenceLevel != .low }, true)
-                }
-                Divider()
-                Button("Uncheck all shown") { state.select(ids, false) }
-                    .keyboardShortcut("a", modifiers: [.command, .shift])
-            } label: {
-                Image(systemName: "ellipsis.circle")
+            Button("Check Medium or High Confidence") {
+                state.select(ids.filter { state.effectiveEstimate($0)?.confidenceLevel != .low }, true)
             }
-            .menuIndicator(.hidden)
-            .help("More ways to check or uncheck (⇧⌘A unchecks all shown)")
+            Divider()
+            Button("Uncheck All Shown  ⇧⌘A") { state.select(ids, false) }
+        } label: {
+            Label("Check", systemImage: "checkmark.circle")
         }
-        .fixedSize()
-    }
-
-    @ViewBuilder
-    private func applyBar(_ selectedCount: Int) -> some View {
-        HStack(spacing: 14) {
-            if let p = state.applyProgress {
-                ProgressView(value: Double(p.done), total: Double(max(1, p.total)))
-                    .frame(maxWidth: 220)
-                Text("Updating \(p.done.formatted()) of \(p.total.formatted())…")
-            } else {
-                Image(systemName: "checkmark.circle.fill").foregroundStyle(Theme.accent)
-                Text(selectedCount == 0 ? "Check the photos you want to update" : "\(selectedCount.formatted()) photos checked")
-                    .fontWeight(.medium)
-            }
-            Spacer()
-            Button {
-                confirmApply = true
-            } label: {
-                Label("Apply \(selectedCount.formatted()) Dates", systemImage: "calendar.badge.checkmark")
-                    .padding(.horizontal, 6)
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-            .disabled(selectedCount == 0 || state.isApplying)
-        }
-        .padding(14)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
-        .padding(.horizontal, 24)
-        .padding(.bottom, 14)
+        .help("Check or uncheck many photos at once (⌘A checks all shown)")
     }
 }
 
@@ -286,16 +234,21 @@ struct ReviewCard: View {
         if let computed = state.estimates[assetID], let estimate = state.effectiveEstimate(assetID), let photo = state.photo(assetID) {
             let decision = state.decision(assetID)
             let overridden = decision.isOverridden
-            VStack(alignment: .leading, spacing: 8) {
-                AssetThumbnail(assetID: assetID, side: .infinity, height: 180)
+            VStack(alignment: .leading, spacing: 6) {
+                AssetThumbnail(assetID: assetID, side: .infinity, height: 170)
                     // A single click checks it: no double-click to wait for, so checking many is quick.
                     .onTapGesture { if !decision.ignored { onToggle() } }
-                    .overlay(alignment: .topLeading) {
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .strokeBorder(decision.selected ? Theme.accent : .clear, lineWidth: 3)
+                            .allowsHitTesting(false)
+                    }
+                    .overlay(alignment: .bottomTrailing) {
                         Image(systemName: decision.selected ? "checkmark.circle.fill" : "circle")
-                            .font(.system(size: 24, weight: .semibold))
+                            .font(.system(size: 20, weight: .semibold))
                             .foregroundStyle(decision.selected ? Theme.accent : .white, decision.selected ? .white : .clear)
-                            .shadow(color: .black.opacity(0.45), radius: 2)
-                            .padding(8)
+                            .shadow(color: .black.opacity(0.4), radius: 2)
+                            .padding(7)
                             .opacity(decision.ignored ? 0.3 : 1)
                             .allowsHitTesting(false)
                     }
@@ -303,44 +256,42 @@ struct ReviewCard: View {
                         Button(action: onOpen) {
                             Image(systemName: "info.circle.fill")
                                 .font(.title3)
-                                .foregroundStyle(.white, .black.opacity(0.45))
+                                .foregroundStyle(.white, .black.opacity(0.4))
                         }
                         .buttonStyle(.plain)
-                        .padding(8)
-                        .help("Details, faces and who’s in it")
+                        .padding(6)
+                        .help("Details and who’s in it")
                     }
-                    .overlay(alignment: .bottomTrailing) {
+                    .overlay(alignment: .bottomLeading) {
                         if let g = computed.groupName {
-                            Label(g, systemImage: "square.stack.3d.up")
+                            Label(g, systemImage: "square.stack")
                                 .font(.caption2)
                                 .lineLimit(1)
                                 .padding(.horizontal, 6).padding(.vertical, 3)
                                 .background(.regularMaterial, in: Capsule())
-                                .padding(8)
+                                .padding(7)
+                                .allowsHitTesting(false)
                         }
                     }
+                    .help("\(photo.filename) · now \(photo.libraryDate?.shortDay ?? "no date")")
 
-                HStack(spacing: 6) {
+                HStack(spacing: 5) {
                     SeasonIcon(season: estimate.season)
                     Text(estimate.displayString)
                         .font(.headline)
+                        .lineLimit(1)
                     if overridden {
-                        Image(systemName: "pencil.circle.fill").foregroundStyle(.secondary).help("You changed this guess")
+                        Image(systemName: "pencil").foregroundStyle(.secondary).help("You changed this guess")
                     }
-                    Spacer()
+                    Spacer(minLength: 4)
                     ConfidenceBadge(estimate: computed.estimate)
                 }
                 Text(subtitle(computed))
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    .lineLimit(2)
-                Text("Now: \(photo.libraryDate?.shortDay ?? "no date") · \(photo.filename)")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
                     .lineLimit(1)
-                    .truncationMode(.middle)
 
-                HStack(spacing: 6) {
+                HStack(spacing: 4) {
                     Stepper(value: Binding(
                         get: { estimate.year },
                         set: { state.setOverride(assetID, year: $0, season: decision.overrideSeason) }),
@@ -348,6 +299,7 @@ struct ReviewCard: View {
                         Text(String(estimate.year)).monospacedDigit()
                     }
                     .fixedSize()
+                    .help("Change the year")
                     Menu {
                         Section("Season") {
                             ForEach(Season.allCases) { s in
@@ -365,46 +317,44 @@ struct ReviewCard: View {
                         }
                         if overridden {
                             Divider()
-                            Button("Use the original guess") { state.setOverride(assetID, year: nil, season: nil) }
+                            Button("Use the Original Guess") { state.setOverride(assetID, year: nil, season: nil) }
                         }
                     } label: {
                         // Shows the exact month when there is one, otherwise the season.
                         Text(estimate.usedExactMonth ? DateEstimate.monthNames[max(1, min(12, estimate.month)) - 1] : estimate.season.displayName)
                     }
+                    .menuStyle(.borderlessButton)
                     .fixedSize()
                     .help("Change the season or the exact month")
-                    Spacer()
-                    Button("Why?") { showWhy = true }
-                        .popover(isPresented: _showWhy.projectedValue, arrowEdge: .bottom) {
-                            ScrollView {
-                                VStack(alignment: .leading, spacing: 10) {
-                                    Text("Why \(estimate.displayString)?").font(.headline)
-                                    Text("Most likely \(computed.estimate.rangeText) · about \(Int(computed.estimate.confidence * 100))% confident within ±2 years")
-                                        .font(.caption).foregroundStyle(.secondary)
-                                    EvidenceList(evidence: computed.evidence)
-                                }
-                                .padding(16)
+                    Spacer(minLength: 0)
+                    Button { showWhy = true } label: {
+                        Image(systemName: "questionmark.bubble")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Why this date?")
+                    .popover(isPresented: _showWhy.projectedValue, arrowEdge: .bottom) {
+                        ScrollView {
+                            VStack(alignment: .leading, spacing: 10) {
+                                Text("Why \(estimate.displayString)?").font(.headline)
+                                Text("Most likely \(computed.estimate.rangeText) · about \(Int(computed.estimate.confidence * 100))% confident within ±2 years")
+                                    .font(.caption).foregroundStyle(.secondary)
+                                EvidenceList(evidence: computed.evidence)
                             }
-                            .frame(width: 420, height: 380)
+                            .padding(16)
                         }
+                        .frame(width: 420, height: 380)
+                    }
                 }
                 .controlSize(.small)
             }
             .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
-            .padding(10)
-            .background(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(Color(nsColor: .controlBackgroundColor))
-                    .shadow(color: .black.opacity(0.07), radius: 5, y: 2)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .stroke(decision.selected ? Theme.accent : .clear, lineWidth: 2)
-            )
-            .opacity(decision.ignored ? 0.55 : 1)
+            .opacity(decision.ignored ? 0.5 : 1)
             .contextMenu {
+                Button(decision.selected ? "Uncheck" : "Check") { state.setSelected(assetID, !decision.selected) }
+                    .disabled(decision.ignored)
                 Button("Details & Who’s in It…") { onOpen() }
                 Button("Show in Photos") { Task { await state.showInPhotos(assetID) } }
+                Divider()
                 if decision.ignored {
                     Button("Review This Photo Again") { state.setIgnored(assetID, false) }
                 } else {

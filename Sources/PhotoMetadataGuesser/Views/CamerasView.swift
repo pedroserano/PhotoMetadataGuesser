@@ -6,67 +6,62 @@ struct CamerasView: View {
     @Environment(AppState.self) private var state
 
     var body: some View {
-        let cameras = state.undatedCameras
+        let cameras = state.undatedCameras.map { CameraItem(name: $0.name, count: $0.count) }
         if cameras.isEmpty {
             ContentUnavailableView {
-                Label("No camera details found", systemImage: "camera")
+                Label("No Camera Details", systemImage: "camera")
             } description: {
                 Text(state.settings.scan.deepCheck
                      ? "None of your undated photos say which camera took them. Scanned prints never do."
-                     : "Turn on “Photos whose file has no capture date” under Find Undated Photos ▸ Options and scan again to read camera details.")
+                     : "Turn on “Photos whose file has no capture date” in Settings ▸ Scanning and scan again to read camera details.")
             }
         } else {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
-                    Text("If you remember when you had a camera, enter the years. Every undated photo it took is dated within them.")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .padding(.horizontal, 20)
-                        .padding(.vertical, 12)
-                    ForEach(cameras, id: \.name) { camera in
-                        CameraRow(name: camera.name, count: camera.count)
-                        Divider().padding(.leading, 56)
-                    }
+            Table(cameras) {
+                TableColumn("Camera") { c in
+                    Label(c.name, systemImage: "camera")
                 }
-                .padding(.bottom, 40)
+                .width(min: 180, ideal: 280)
+                TableColumn("Undated Photos") { c in
+                    Text(c.count.formatted()).monospacedDigit().foregroundStyle(.secondary)
+                }
+                .width(110)
+                TableColumn("Used") { c in
+                    CameraYears(state: state, name: c.name)
+                }
+                .width(min: 180, ideal: 200)
             }
+            .navigationSubtitle("Enter the years you used a camera, and its photos are dated within them")
         }
     }
 }
 
-struct CameraRow: View {
-    @Environment(AppState.self) private var state
+struct CameraItem: Identifiable {
+    var id: String { name }
     var name: String
     var count: Int
+}
+
+/// The years a camera was in use, edited in place.
+struct CameraYears: View {
+    /// Passed in rather than read from the environment: Table rows can be laid out before the
+    /// environment reaches them, and reading a missing Observable from it crashes.
+    var state: AppState
+    var name: String
 
     private var period: CameraPeriod? { state.cameraPeriods.first { $0.id == name } }
 
     var body: some View {
-        HStack(spacing: 12) {
-            Image(systemName: "camera.fill")
-                .font(.title3)
-                .foregroundStyle(Theme.accent)
-                .frame(width: 24)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(name).font(.body.weight(.medium))
-                Text("\(count.formatted()) undated photo\(count == 1 ? "" : "s")")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            .frame(minWidth: 160, maxWidth: .infinity, alignment: .leading)
-            Text("Used from").foregroundStyle(.secondary)
-            NumberField(title: "year", value: Binding(
+        HStack(spacing: 6) {
+            NumberField(title: "From", value: Binding(
                 get: { period?.fromYear },
                 set: { state.setCameraYears(name, from: $0, to: period?.toYear) }),
-                range: YearBounds.earliestPhotoYear...YearBounds.currentYear(), width: 64)
+                range: YearBounds.earliestPhotoYear...YearBounds.currentYear(), width: 60)
             Text("to").foregroundStyle(.secondary)
-            NumberField(title: "year", value: Binding(
+            NumberField(title: "To", value: Binding(
                 get: { period?.toYear },
                 set: { state.setCameraYears(name, from: period?.fromYear, to: $0) }),
-                range: YearBounds.earliestPhotoYear...YearBounds.currentYear(), width: 64)
+                range: YearBounds.earliestPhotoYear...YearBounds.currentYear(), width: 60)
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 8)
+        .controlSize(.small)
     }
 }

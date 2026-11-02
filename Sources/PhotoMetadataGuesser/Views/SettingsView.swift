@@ -3,6 +3,18 @@ import SwiftUI
 import DateGuessCore
 
 struct SettingsView: View {
+    var body: some View {
+        TabView {
+            GeneralSettingsView()
+                .tabItem { Label("General", systemImage: "gearshape") }
+            ScanSettingsView()
+                .tabItem { Label("Scanning", systemImage: "magnifyingglass") }
+        }
+        .frame(width: 560, height: 560)
+    }
+}
+
+struct GeneralSettingsView: View {
     @Environment(AppState.self) private var state
     var _confirmReset = State<Bool>(initialValue: false)
     private var confirmReset: Bool { get { _confirmReset.wrappedValue } nonmutating set { _confirmReset.wrappedValue = newValue } }
@@ -64,8 +76,6 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 560)
-        .padding(.vertical, 8)
         .alert("Clear all estimates?", isPresented: _confirmReset.projectedValue) {
             Button("Clear", role: .destructive) {
                 state.analyses = [:]
@@ -74,7 +84,7 @@ struct SettingsView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Your groups, people and history are kept. You’ll need to run Estimate Dates again.")
+            Text("Your groups, people and history are kept. Guesses are made again in the background.")
         }
     }
 }

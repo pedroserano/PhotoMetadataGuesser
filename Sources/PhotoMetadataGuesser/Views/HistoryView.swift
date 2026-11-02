@@ -7,61 +7,51 @@ struct HistoryView: View {
     private var batchToUndo: ApplyBatch? { get { _batchToUndo.wrappedValue } nonmutating set { _batchToUndo.wrappedValue = newValue } }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                StepHeader(step: nil, title: "History",
-                           subtitle: "Every time you click Apply, the old dates are saved here so you can put them back.",
-                           systemImage: "clock.arrow.circlepath")
-                if state.journal.isEmpty {
-                    Card {
-                        Text("No dates have been changed yet.").foregroundStyle(.secondary)
-                    }
-                }
-                ForEach(state.journal) { batch in
-                    Card {
-                        HStack(alignment: .top) {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(batch.date.formatted(date: .long, time: .shortened)).font(.headline)
-                                Text("\(batch.entries.count.formatted()) photos updated"
-                                     + (batch.failures.isEmpty ? "" : " · \(batch.failures.count) couldn’t be changed"))
-                                    .foregroundStyle(.secondary)
-                                if batch.undone {
-                                    Label("Undone — previous dates restored", systemImage: "arrow.uturn.backward.circle")
-                                        .foregroundStyle(.secondary)
-                                }
-                            }
-                            Spacer()
-                            if !batch.undone {
-                                Button("Undo…") { batchToUndo = batch }
-                                    .disabled(state.isApplying)
-                            }
-                        }
-                        ScrollView(.horizontal, showsIndicators: false) {
-                            LazyHStack(spacing: 8) {
-                                ForEach(batch.entries.prefix(30), id: \.assetID) { entry in
-                                    VStack(spacing: 2) {
-                                        AssetThumbnail(assetID: entry.assetID, side: 70, cornerRadius: 8)
-                                        Text(entry.newDate.formatted(.dateTime.month(.abbreviated).year()))
-                                            .font(.caption2)
-                                            .foregroundStyle(.secondary)
+        Group {
+            if state.journal.isEmpty {
+                ContentUnavailableView("No Changes Yet", systemImage: "clock.arrow.circlepath",
+                                       description: Text("Each time you apply dates, the old ones are kept here so you can put them back."))
+            } else {
+                List {
+                    ForEach(state.journal) { batch in
+                        Section {
+                            ScrollView(.horizontal, showsIndicators: false) {
+                                LazyHStack(spacing: 6) {
+                                    ForEach(batch.entries.prefix(30), id: \.assetID) { entry in
+                                        VStack(spacing: 2) {
+                                            AssetThumbnail(assetID: entry.assetID, side: 64, cornerRadius: 6)
+                                            Text(entry.newDate.formatted(.dateTime.month(.abbreviated).year()))
+                                                .font(.caption2)
+                                                .foregroundStyle(.secondary)
+                                        }
                                     }
                                 }
                             }
-                        }
-                        .frame(height: 92)
-                        if !batch.failures.isEmpty {
-                            DisclosureGroup("Problems") {
-                                ForEach(batch.failures.keys.sorted().prefix(50), id: \.self) { id in
-                                    Text("\(state.photo(id)?.filename ?? id): \(batch.failures[id] ?? "")")
-                                        .font(.caption)
+                            .frame(height: 84)
+                            if !batch.failures.isEmpty {
+                                DisclosureGroup("\(batch.failures.count) couldn’t be changed") {
+                                    ForEach(batch.failures.keys.sorted().prefix(50), id: \.self) { id in
+                                        Text("\(state.photo(id)?.filename ?? id): \(batch.failures[id] ?? "")")
+                                            .font(.caption)
+                                    }
+                                }
+                            }
+                        } header: {
+                            HStack {
+                                Text(batch.date.formatted(date: .long, time: .shortened))
+                                Text("· \(batch.entries.count.formatted()) photos" + (batch.undone ? " · undone" : ""))
+                                    .foregroundStyle(.secondary)
+                                Spacer()
+                                if !batch.undone {
+                                    Button("Undo…") { batchToUndo = batch }
+                                        .disabled(state.isApplying)
                                 }
                             }
                         }
                     }
                 }
+                .listStyle(.inset)
             }
-            .padding(28)
-            .frame(maxWidth: 900, alignment: .leading)
         }
         .alert("Undo this change?", isPresented: Binding(get: { batchToUndo != nil }, set: { if !$0 { batchToUndo = nil } })) {
             Button("Restore Previous Dates") {

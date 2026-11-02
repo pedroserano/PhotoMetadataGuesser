@@ -7,91 +7,47 @@ import DateGuessCore
 // `x` accessor) instead of `@State`. Newer SDKs implement `@State` as a macro whose plugin ships
 // only with full Xcode, so `@State` breaks builds that use just the Command Line Tools.
 
+/// System colors throughout, so the app follows the accent color and appearance set in System Settings.
 enum Theme {
-    static let accent = Color(red: 0.93, green: 0.42, blue: 0.40)
-    static let peach = Color(red: 1.0, green: 0.86, blue: 0.76)
-    static let blush = Color(red: 0.98, green: 0.74, blue: 0.80)
-    static let sky = Color(red: 0.70, green: 0.84, blue: 0.98)
+    static let accent = Color.accentColor
     static let background = Color(nsColor: .windowBackgroundColor)
-    static let headerGradient = LinearGradient(colors: [peach, blush], startPoint: .topLeading, endPoint: .bottomTrailing)
 
     static func color(for level: ConfidenceLevel) -> Color {
         switch level {
-        case .high: return Color(red: 0.30, green: 0.70, blue: 0.45)
-        case .medium: return Color(red: 0.95, green: 0.65, blue: 0.25)
-        case .low: return Color(red: 0.75, green: 0.75, blue: 0.78)
+        case .high: return .green
+        case .medium: return .orange
+        case .low: return .secondary
         }
     }
 
     static func color(for season: Season) -> Color {
         switch season {
-        case .winter: return Color(red: 0.45, green: 0.65, blue: 0.95)
-        case .spring: return Color(red: 0.45, green: 0.78, blue: 0.50)
-        case .summer: return Color(red: 0.98, green: 0.70, blue: 0.20)
-        case .fall: return Color(red: 0.88, green: 0.48, blue: 0.25)
+        case .winter: return .blue
+        case .spring: return .green
+        case .summer: return .yellow
+        case .fall: return .orange
         }
     }
 }
 
-/// Big friendly page header.
-struct StepHeader: View {
-    var step: Int?
-    var title: String
-    var subtitle: String
-    var systemImage: String
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 16) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(Theme.headerGradient)
-                    .frame(width: 58, height: 58)
-                Image(systemName: systemImage)
-                    .font(.system(size: 26, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .shadow(color: Theme.accent.opacity(0.4), radius: 2)
-            }
-            VStack(alignment: .leading, spacing: 4) {
-                if let step {
-                    Text("STEP \(step)")
-                        .font(.caption.weight(.bold))
-                        .foregroundStyle(Theme.accent)
-                }
-                Text(title)
-                    .font(.largeTitle.weight(.semibold))
-                Text(subtitle)
-                    .font(.body)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-    }
-}
-
-/// Rounded card container.
+/// A plain grouped box, like the sections in System Settings.
 struct Card<Content: View>: View {
     var title: String?
     var systemImage: String?
     @ViewBuilder var content: Content
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            if let title {
-                Label {
-                    Text(title).font(.headline)
-                } icon: {
-                    if let systemImage { Image(systemName: systemImage).foregroundStyle(Theme.accent) }
-                }
+        GroupBox {
+            VStack(alignment: .leading, spacing: 10) {
+                content
             }
-            content
+            .padding(6)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        } label: {
+            if let title {
+                if let systemImage { Label(title, systemImage: systemImage) } else { Text(title) }
+            }
         }
-        .padding(18)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(Color(nsColor: .controlBackgroundColor))
-                .shadow(color: .black.opacity(0.06), radius: 6, y: 2)
-        )
     }
 }
 
@@ -196,13 +152,10 @@ struct ConfidenceBadge: View {
 
     var body: some View {
         let level = estimate.confidenceLevel
-        Text(level.displayName)
-            .font(.caption2.weight(.bold))
-            .padding(.horizontal, 7)
-            .padding(.vertical, 2)
-            .background(Theme.color(for: level).opacity(0.2), in: Capsule())
-            .foregroundStyle(Theme.color(for: level))
-            .help("About \(Int(estimate.confidence * 100))% likely to be within 2 years")
+        Circle()
+            .fill(Theme.color(for: level))
+            .frame(width: 8, height: 8)
+            .help("\(level.displayName) confidence: about \(Int(estimate.confidence * 100))% likely to be within 2 years")
     }
 }
 

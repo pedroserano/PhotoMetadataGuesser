@@ -1,43 +1,102 @@
 import SwiftUI
 import DateGuessCore
 
-/// Likely events among undated photos, even when they were scanned or imported at different times.
-/// Date one event and every photo in it gets that date.
+/// Events and groups in one place: likely events among undated photos (even when they were scanned
+/// years apart), suggested groups, and the events and groups you've saved.
 struct EventsView: View {
     @Environment(AppState.self) private var state
-    var _editing = State<EventDraft?>(initialValue: nil)
-    private var editing: EventDraft? { get { _editing.wrappedValue } nonmutating set { _editing.wrappedValue = newValue } }
+    @State private var editing: EventDraft?
+    @State private var openGroup: IdentifiedUUID?
+    @State private var showingNewGroup = false
+    @State private var suggestions: [GroupSuggestion] = []
 
     var body: some View {
         let events = state.eventSuggestions
-        Group {
-            if events.isEmpty {
-                ContentUnavailableView {
-                    Label(state.isEstimating ? "Looking for events…" : "No suggested events", systemImage: "square.stack.3d.up")
-                } description: {
-                    Text(state.isEstimating
-                         ? "Events show up here once photos have been compared."
-                         : "Photos that look like they’re from the same day or occasion show up here. Ones you’ve already saved as events are under Groups.")
-                }
-            } else {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text("These look like they’re from the same event, even if they were scanned years apart. Click a photo that doesn’t belong to leave it out, then click Same Event: they’ll share one date and be checked in Review & Apply. Know the date? Click Set Date.")
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                        ForEach(events.prefix(200), id: \.self) { ids in
-                            EventCard(ids: ids, onOpen: { editing = EventDraft(ids: $0) })
-                        }
+        List {
+            if !events.isEmpty {
+                Section {
+                    ForEach(events.prefix(200), id: \.self) { ids in
+                        EventCard(state: state, ids: ids, onOpen: { editing = EventDraft(ids: $0) })
                     }
-                    .padding(20)
+                } header: {
+                    Text("Suggested Events")
+                } footer: {
+                    Text("Click a photo that doesn’t belong to leave it out. Same Event gives them one shared date and checks them for Apply.")
+                }
+            }
+            if !suggestions.isEmpty {
+                Section("Suggested Groups") {
+                    ForEach(suggestions.prefix(40)) { s in
+                        HStack(spacing: 12) {
+                            Thumbnails(ids: s.assetIDs, side: 44, limit: 4)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(s.title).lineLimit(1)
+                                Text(s.reason).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                            }
+                            Spacer()
+                            Button("Make Group") {
+                                let g = state.createGroup(name: s.title, assetIDs: s.assetIDs, kind: s.kind)
+                                openGroup = IdentifiedUUID(id: g.id)
+                            }
+                        }
+                        .padding(.vertical, 4)
+                    }
+                }
+            }
+            Section("Your Events & Groups") {
+                if state.groups.isEmpty {
+                    Text("None yet. Click Same Event above, or New Group to gather photos you know go together.")
+                        .foregroundStyle(.secondary)
+                }
+                ForEach(state.groups) { g in
+                    Button {
+                        openGroup = IdentifiedUUID(id: g.id)
+                    } label: {
+                        GroupRow(state: state, group: g)
+                    }
+                    .buttonStyle(.plain)
+                    .contextMenu {
+                        Button("Edit…") { openGroup = IdentifiedUUID(id: g.id) }
+                        Button("Delete", role: .destructive) { state.groups.removeAll { $0.id == g.id } }
+                    }
                 }
             }
         }
-        .sheet(item: _editing.projectedValue) { draft in
+        .listStyle(.inset)
+        .overlay {
+            if events.isEmpty && state.isEstimating && state.groups.isEmpty {
+                ContentUnavailableView("Looking for Events…", systemImage: "square.stack",
+                                       description: Text("Events show up here once photos have been compared."))
+            }
+        }
+        .navigationSubtitle(events.isEmpty ? "" : "\(events.count.formatted()) suggested")
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    showingNewGroup = true
+                } label: {
+                    Label("New Group", systemImage: "plus")
+                }
+                .help("Gather photos you know go together, and say what you know about them")
+                .disabled(state.undatedSorted.isEmpty)
+            }
+        }
+        .onAppear { suggestions = state.groupSuggestions() }
+        .onChange(of: state.groups) { _, _ in suggestions = state.groupSuggestions() }
+        .sheet(item: $editing) { draft in
             EventEditor(seed: draft.ids)
         }
+        .sheet(item: $openGroup) { item in
+            GroupSheet(groupID: item.id)
+        }
+        .sheet(isPresented: $showingNewGroup) {
+            PhotoPickerSheet(groupID: nil) { id in openGroup = IdentifiedUUID(id: id) }
+        }
     }
+}
+
+struct IdentifiedUUID: Identifiable {
+    var id: UUID
 }
 
 struct EventDraft: Identifiable {
@@ -45,8 +104,27 @@ struct EventDraft: Identifiable {
     var ids: [String]
 }
 
+/// A short row of thumbnails, with "+N" for the rest.
+struct Thumbnails: View {
+    var ids: [String]
+    var side: CGFloat
+    var limit: Int
+
+    var body: some View {
+        HStack(spacing: 4) {
+            ForEach(ids.prefix(limit), id: \.self) { id in
+                AssetThumbnail(assetID: id, side: side, cornerRadius: 5)
+            }
+            if ids.count > limit {
+                Text("+\(ids.count - limit)").font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
 struct EventCard: View {
-    @Environment(AppState.self) private var state
+    /// Passed in, not read from the environment (see PersonNameCell).
+    var state: AppState
     var ids: [String]
     var onOpen: ([String]) -> Void
     /// Photos the user clicked to leave out of this event.
@@ -55,23 +133,18 @@ struct EventCard: View {
     private var kept: [String] { ids.filter { !excluded.contains($0) } }
 
     var body: some View {
-        Card {
+        VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline) {
-                Text("\(kept.count) photos").font(.headline)
-                if let guess = sharedGuess {
-                    Text("· would be dated \(guess)")
-                        .foregroundStyle(.secondary)
-                        .help("The date all these photos get if you click Same Event, from all their clues together")
-                }
+                Text(sharedGuess ?? "Event").font(.headline)
+                    .help("The date all these photos get if you click Same Event, from all their clues together")
+                Text("\(kept.count) photos").foregroundStyle(.secondary)
                 Spacer()
                 Button("Not One Event") { state.dismissEvent(ids) }
                     .buttonStyle(.borderless)
                 Button("Set Date…") { onOpen(kept) }
-                Button {
+                Button("Same Event") {
                     state.saveEvent(kept, name: sharedGuess.map { "Event, \($0)" } ?? "Event (\(kept.count) photos)",
                                     year: nil, month: nil, season: nil)
-                } label: {
-                    Label("Same Event", systemImage: "checkmark")
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(kept.count < 2)
@@ -81,7 +154,7 @@ struct EventCard: View {
                 HStack(spacing: 6) {
                     ForEach(ids.prefix(12), id: \.self) { id in
                         let out = excluded.contains(id)
-                        AssetThumbnail(assetID: id, side: 84, cornerRadius: 6)
+                        AssetThumbnail(assetID: id, side: 80, cornerRadius: 6)
                             .opacity(out ? 0.35 : 1)
                             .overlay(alignment: .topTrailing) {
                                 if out {
@@ -95,6 +168,7 @@ struct EventCard: View {
                 }
             }
         }
+        .padding(.vertical, 6)
     }
 
     /// The date this event gets if saved now, with every photo's clues pooled (e.g. "July 1979").
@@ -103,6 +177,290 @@ struct EventCard: View {
         if let combined = state.eventEstimates[AppState.eventKey(ids)] { return combined.displayString }
         let guesses = ids.compactMap { state.effectiveEstimate($0)?.displayString }
         return Dictionary(grouping: guesses, by: { $0 }).max { $0.value.count < $1.value.count }?.key
+    }
+}
+
+/// A saved event or group in the list.
+struct GroupRow: View {
+    /// Passed in, not read from the environment (see PersonNameCell).
+    var state: AppState
+    var group: PhotoGroup
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Thumbnails(ids: group.assetIDs, side: 44, limit: 4)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(group.name).lineLimit(1)
+                Text(detail).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            }
+            Spacer()
+            Image(systemName: "chevron.right").foregroundStyle(.tertiary)
+        }
+        .padding(.vertical, 4)
+        .contentShape(Rectangle())
+    }
+
+    private var detail: String {
+        var parts = ["\(group.assetIDs.count) photos", group.kind == .sameEvent ? "one event" : "same era"]
+        if let first = group.assetIDs.first, group.kind == .sameEvent, let e = state.effectiveEstimate(first) {
+            parts.append(e.displayString)
+        }
+        if !group.hint.isEmpty { parts.append(group.hint) }
+        return parts.joined(separator: " · ")
+    }
+}
+
+/// Everything about one saved event or group: what you know, and its photos.
+struct GroupSheet: View {
+    @Environment(AppState.self) private var state
+    @Environment(\.dismiss) private var dismiss
+    var groupID: UUID
+    @State private var selected: Set<String> = []
+    @State private var adding = false
+
+    var body: some View {
+        let group = state.groups.first { $0.id == groupID }
+        VStack(spacing: 0) {
+            if let group {
+                HSplitView {
+                    GroupEditor(groupID: groupID)
+                        .frame(minWidth: 340, idealWidth: 380, maxWidth: 420)
+                    VStack(alignment: .leading, spacing: 0) {
+                        HStack {
+                            Text("\(group.assetIDs.count) photos").font(.headline)
+                            Spacer()
+                            if !selected.isEmpty {
+                                Button("Remove \(selected.count) from Group") {
+                                    state.remove(Array(selected), from: groupID)
+                                    selected.removeAll()
+                                }
+                            }
+                            Button("Add Photos…") { adding = true }
+                        }
+                        .padding(12)
+                        ScrollView {
+                            PhotoGrid(ids: group.assetIDs, selected: $selected)
+                                .padding(12)
+                        }
+                    }
+                    .frame(minWidth: 320)
+                }
+            }
+            Divider()
+            HStack {
+                Button("Delete Group", role: .destructive) {
+                    state.groups.removeAll { $0.id == groupID }
+                    dismiss()
+                }
+                Spacer()
+                Button("Done") { dismiss() }
+                    .keyboardShortcut(.defaultAction)
+            }
+            .padding(14)
+        }
+        .frame(width: 900, height: 600)
+        .sheet(isPresented: $adding) {
+            PhotoPickerSheet(groupID: groupID) { _ in }
+        }
+    }
+}
+
+/// A grid of undated photos; click to select.
+struct PhotoGrid: View {
+    @Environment(AppState.self) private var state
+    var ids: [String]
+    @Binding var selected: Set<String>
+
+    var body: some View {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 110, maximum: 140), spacing: 10)], spacing: 10) {
+            ForEach(ids, id: \.self) { id in
+                if let photo = state.photo(id) {
+                    GroupPhotoCell(photo: photo, isSelected: selected.contains(id), groupName: nil)
+                        .onTapGesture {
+                            if selected.contains(id) { selected.remove(id) } else { selected.insert(id) }
+                        }
+                }
+            }
+        }
+    }
+}
+
+/// Pick undated photos for a new group, or to add to an existing one.
+struct PhotoPickerSheet: View {
+    @Environment(AppState.self) private var state
+    @Environment(\.dismiss) private var dismiss
+    /// Nil makes a new group.
+    var groupID: UUID?
+    var onCreate: (UUID) -> Void
+    @State private var selected: Set<String> = []
+    @State private var name = ""
+    @State private var onlyUngrouped = true
+    @State private var search = ""
+
+    private var photos: [String] {
+        let grouped = Set(state.groups.flatMap(\.assetIDs))
+        let current = Set(state.groups.first { $0.id == groupID }?.assetIDs ?? [])
+        return state.undatedSorted.filter { p in
+            if current.contains(p.id) { return false }
+            if onlyUngrouped && grouped.contains(p.id) { return false }
+            if search.isEmpty { return true }
+            return p.filename.localizedCaseInsensitiveContains(search)
+                || p.albums.contains { $0.localizedCaseInsensitiveContains(search) }
+        }
+        .map(\.id)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if groupID == nil {
+                TextField("Group name", text: $name, prompt: Text("Name, e.g. Grandma’s 80th birthday"))
+                    .font(.title2.weight(.semibold))
+                    .textFieldStyle(.plain)
+            } else {
+                Text("Add Photos").font(.title2.weight(.semibold))
+            }
+            HStack {
+                TextField("Search filenames or albums", text: $search)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(maxWidth: 260)
+                Toggle("Only photos not in a group", isOn: $onlyUngrouped)
+                    .toggleStyle(.checkbox)
+                Spacer()
+                Button("Select All") { selected.formUnion(photos) }
+            }
+            ScrollView {
+                PhotoGrid(ids: photos, selected: $selected)
+            }
+            .overlay {
+                if photos.isEmpty { ContentUnavailableView("No Photos", systemImage: "photo.on.rectangle") }
+            }
+            HStack {
+                Text("\(selected.count) selected").foregroundStyle(.secondary)
+                Spacer()
+                Button("Cancel") { dismiss() }
+                Button(groupID == nil ? "Create Group" : "Add \(selected.count)") {
+                    let ids = state.undatedSorted.map(\.id).filter { selected.contains($0) }
+                    if let groupID {
+                        state.add(ids, to: groupID)
+                    } else {
+                        let g = state.createGroup(name: name.isEmpty ? "New group" : name, assetIDs: ids)
+                        onCreate(g.id)
+                    }
+                    dismiss()
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+                .disabled(selected.isEmpty)
+            }
+        }
+        .padding(20)
+        .frame(width: 780, height: 600)
+    }
+}
+
+struct GroupPhotoCell: View {
+    var photo: UndatedPhoto
+    var isSelected: Bool
+    var groupName: String?
+
+    var body: some View {
+        AssetThumbnail(assetID: photo.id, side: 120, height: 100, cornerRadius: 8)
+            .overlay(alignment: .bottomTrailing) {
+                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                    .font(.title3)
+                    .foregroundStyle(isSelected ? Theme.accent : .white, isSelected ? .white : .clear)
+                    .shadow(radius: 2)
+                    .padding(5)
+            }
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .strokeBorder(isSelected ? Theme.accent : .clear, lineWidth: 3)
+            )
+            .contentShape(Rectangle())
+            .help(photo.albums.isEmpty ? photo.filename : "\(photo.filename)\nAlbums: \(photo.albums.joined(separator: ", "))")
+    }
+}
+
+/// Edits everything the user knows about one group.
+struct GroupEditor: View {
+    @Environment(AppState.self) private var state
+    var groupID: UUID
+
+    /// Binds by ID (not index) so deleting or reordering groups can't point at the wrong one.
+    private var groupBinding: Binding<PhotoGroup>? {
+        guard let current = state.groups.first(where: { $0.id == groupID }) else { return nil }
+        let state = self.state, id = groupID
+        return Binding(
+            get: { state.groups.first { $0.id == id } ?? current },
+            set: { new in
+                if let i = state.groups.firstIndex(where: { $0.id == id }) { state.groups[i] = new }
+            })
+    }
+
+    var body: some View {
+        if let group = groupBinding {
+            Form {
+                Section {
+                    TextField("Name", text: group.name)
+                    Picker("These photos are from", selection: group.kind) {
+                        ForEach(GroupKind.allCases) { Text($0.displayName).tag($0) }
+                    }
+                    .pickerStyle(.radioGroup)
+                }
+                Section("What you know") {
+                    TextField("Notes", text: group.hint, prompt: Text("e.g. Lake Tahoe trip, late 70s"), axis: .vertical)
+                        .lineLimit(1...3)
+                    LabeledContent("Years") {
+                        HStack {
+                            NumberField(title: "From", value: group.yearFrom, range: YearBounds.earliestPhotoYear...YearBounds.currentYear())
+                            Text("to")
+                            NumberField(title: "To", value: group.yearTo, range: YearBounds.earliestPhotoYear...YearBounds.currentYear())
+                        }
+                    }
+                    Picker("Season", selection: group.season) {
+                        Text("Unknown").tag(Season?.none)
+                        ForEach(Season.allCases) { s in
+                            Label(s.displayName, systemImage: s.symbolName).tag(Season?.some(s))
+                        }
+                    }
+                }
+                Section {
+                    ForEach(group.people) { $hint in
+                        HStack {
+                            Text(state.people.first { $0.id == hint.personID }?.name ?? "Unknown person")
+                            Spacer()
+                            Text("about").foregroundStyle(.secondary)
+                            NumberField(title: "age", value: $hint.approximateAge, range: 0...110, width: 50)
+                            Button {
+                                group.wrappedValue.people.removeAll { $0.id == hint.id }
+                            } label: {
+                                Image(systemName: "minus.circle")
+                            }
+                            .buttonStyle(.borderless)
+                            .help("Remove")
+                        }
+                    }
+                    Menu {
+                        if state.people.isEmpty {
+                            Text("Import people under People first")
+                        }
+                        ForEach(state.people) { person in
+                            Button(person.name) {
+                                group.wrappedValue.people.append(GroupPersonHint(personID: person.id))
+                            }
+                        }
+                    } label: {
+                        Label("Add Person", systemImage: "person.badge.plus")
+                    }
+                    .fixedSize()
+                } header: {
+                    Text("Who’s in these photos")
+                } footer: {
+                    Text("Ages are optional.")
+                }
+            }
+            .formStyle(.grouped)
+        }
     }
 }
 
