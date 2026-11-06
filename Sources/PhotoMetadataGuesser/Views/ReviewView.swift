@@ -32,6 +32,7 @@ struct ReviewView: View {
         case library = "Library order"
         case confidence = "Most confident first"
         case year = "Estimated year"
+        case clues = "Most clues first"
         case filename = "Filename"
         var id: String { rawValue }
     }
@@ -61,6 +62,15 @@ struct ReviewView: View {
             items.sort { (state.estimates[$0.id]?.estimate.confidence ?? 0) > (state.estimates[$1.id]?.estimate.confidence ?? 0) }
         case .year:
             items.sort { (state.effectiveEstimate($0.id)?.year ?? 0) < (state.effectiveEstimate($1.id)?.year ?? 0) }
+        case .clues:
+            // The same count the card shows ("3 clues"); ties keep library order.
+            let counts = Dictionary(uniqueKeysWithValues: items.map { p in
+                (p.id, state.estimates[p.id]?.evidence.filter(\.hasYearInfo).count ?? 0)
+            })
+            items = items.enumerated().sorted { a, b in
+                let ca = counts[a.element.id] ?? 0, cb = counts[b.element.id] ?? 0
+                return ca != cb ? ca > cb : a.offset < b.offset
+            }.map(\.element)
         case .filename:
             items.sort { $0.filename.localizedStandardCompare($1.filename) == .orderedAscending }
         }
@@ -292,14 +302,10 @@ struct ReviewCard: View {
                     .lineLimit(1)
 
                 HStack(spacing: 4) {
-                    Stepper(value: Binding(
-                        get: { estimate.year },
-                        set: { state.setOverride(assetID, year: $0, season: decision.overrideSeason) }),
-                        in: state.lowestYear...YearBounds.currentYear()) {
-                        Text(String(estimate.year)).monospacedDigit()
+                    YearComboBox(year: estimate.year, range: state.lowestYear...YearBounds.currentYear()) {
+                        state.setOverride(assetID, year: $0, season: decision.overrideSeason)
                     }
-                    .fixedSize()
-                    .help("Change the year")
+                    .help("Type a year, or pick one from the list")
                     Menu {
                         Section("Season") {
                             ForEach(Season.allCases) { s in
@@ -321,7 +327,7 @@ struct ReviewCard: View {
                         }
                     } label: {
                         // Shows the exact month when there is one, otherwise the season.
-                        Text(estimate.usedExactMonth ? DateEstimate.monthNames[max(1, min(12, estimate.month)) - 1] : estimate.season.displayName)
+                        Text(estimate.usedExactMonth ? DateEstimate.monthNames[max(1, min(12, estimate.month)) - 1] : estimate.seasonIsDefault ? "Season" : estimate.season.displayName)
                     }
                     .menuStyle(.borderlessButton)
                     .fixedSize()
@@ -367,6 +373,17 @@ struct ReviewCard: View {
     private func subtitle(_ c: ComputedEstimate) -> String {
         let e = c.estimate
         if !e.hasAnyEvidence { return "No clues found — please set the year yourself" }
+        if e.onlyLimits {
+            let hard = c.evidence.filter(\.isHardConstraint)
+            let lo = hard.compactMap(\.yearLow).max(), hi = hard.compactMap(\.yearHigh).min()
+            let span = switch (lo, hi) {
+            case let (lo?, hi?): "\(lo)–\(hi)"
+            case let (lo?, nil): "\(lo) or later"
+            case let (nil, hi?): "\(hi) or earlier"
+            default: e.rangeText
+            }
+            return "No real clues, only \(span) · set the year if you know it"
+        }
         let used = c.evidence.filter { $0.hasYearInfo }.count
         var text = "Likely \(e.rangeText) · \(used) clue\(used == 1 ? "" : "s")"
         if e.seasonIsDefault { text += " · season unknown" }

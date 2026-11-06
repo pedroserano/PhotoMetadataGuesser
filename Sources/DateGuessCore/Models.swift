@@ -183,12 +183,15 @@ public struct DateEstimate: Codable, Hashable, Sendable {
     public var usedExactMonth: Bool
     public var usedExactDay: Bool
     public var hasAnyEvidence: Bool
+    /// The only clues are limits (not before / not after a year), so the year is just the middle of
+    /// what's possible, not a real guess.
+    public var onlyLimits: Bool
 
     public init(
         year: Int, season: Season, month: Int, day: Int = 1,
         yearLow: Int, yearHigh: Int, confidence: Double,
         seasonIsDefault: Bool, usedExactMonth: Bool = false, usedExactDay: Bool = false,
-        hasAnyEvidence: Bool
+        hasAnyEvidence: Bool, onlyLimits: Bool = false
     ) {
         self.year = year
         self.season = season
@@ -201,6 +204,7 @@ public struct DateEstimate: Codable, Hashable, Sendable {
         self.usedExactMonth = usedExactMonth
         self.usedExactDay = usedExactDay
         self.hasAnyEvidence = hasAnyEvidence
+        self.onlyLimits = onlyLimits
     }
 
     public var confidenceLevel: ConfidenceLevel {
@@ -209,11 +213,12 @@ public struct DateEstimate: Codable, Hashable, Sendable {
         return .low
     }
 
-    /// e.g. "Summer 1976", "July 1976", or "July 4, 1976".
+    /// e.g. "Summer 1976", "July 1976", or "July 4, 1976"; just "1976" when nothing hinted at a season.
     public var displayString: String {
         let monthName = DateEstimate.monthNames[max(1, min(12, month)) - 1]
         if usedExactDay { return "\(monthName) \(day), \(year)" }
         if usedExactMonth { return "\(monthName) \(year)" }
+        if seasonIsDefault { return "\(year)" }
         return "\(season.displayName) \(year)"
     }
 
@@ -235,7 +240,7 @@ public struct DateEstimate: Codable, Hashable, Sendable {
     /// Returns a copy with a user-chosen year/season (clears exact month/day).
     public func overridden(year newYear: Int? = nil, season newSeason: Season? = nil, month newMonth: Int? = nil) -> DateEstimate {
         var copy = self
-        if let newYear { copy.year = newYear }
+        if let newYear { copy.year = newYear; copy.onlyLimits = false }
         // A month the user knows (e.g. for a whole event) beats any season.
         if let m = newMonth, (1...12).contains(m) {
             copy.month = m

@@ -542,4 +542,28 @@ final class OverrideMonthTests: XCTestCase {
         XCTAssertEqual(set.season, .summer)
         XCTAssertEqual(set.displayString, "July 1979")
     }
+
+    /// Photos whose only clues were "1984 or later" and "scanned in 2013" were all guessed 2007: the
+    /// background prior's tail just past 2005 scored higher than the years inside it.
+    func testLimitsOnlyTakesTheMiddleAndNoTailBump() {
+        let floor = ProvenanceClues.earliestYear(1984)
+        let ceiling = DateEvidence(source: .libraryDate, summary: "Scanned in 2013", yearLow: nil, yearHigh: 2013,
+                                   weight: 1, isHardConstraint: true)
+        let e = EvidenceFusion.estimate(from: [floor, ceiling], options: .init(maxYear: 2026))
+        XCTAssertTrue(e.onlyLimits)
+        XCTAssertTrue((1994...2003).contains(e.year), "got \(e.year)")
+        XCTAssertEqual(e.displayString, String(e.year), "No season clue, so no season in the name")
+
+        let o = EvidenceFusion.Options(maxYear: 2026)
+        let ll = EvidenceFusion.logLikelihood(EvidenceFusion.backgroundPrior, options: o)!
+        for year in 2006...2026 {
+            XCTAssertLessThanOrEqual(ll[year - o.minYear], ll[2005 - o.minYear] + 1e-12, "\(year) above the range’s edge")
+        }
+
+        // A real clue still decides.
+        let film = DateEvidence(source: .fileFormat, summary: "test", yearLow: 1990, yearHigh: 1994, weight: 0.8)
+        let guided = EvidenceFusion.estimate(from: [floor, ceiling, film], options: o)
+        XCTAssertFalse(guided.onlyLimits)
+        XCTAssertTrue((1990...1994).contains(guided.year))
+    }
 }

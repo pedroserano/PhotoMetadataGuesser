@@ -93,6 +93,15 @@ struct ApplyBatch: Codable, Identifiable, Hashable {
     var entries: [JournalEntry]
     var failures: [String: String] = [:]
     var undone = false
+    /// Photos in this batch whose previous date was put back on their own (e.g. by undoing one event).
+    var undoneIDs: Set<String>? = nil
+
+    /// Entries still in effect.
+    var liveEntries: [JournalEntry] {
+        guard !undone else { return [] }
+        let gone = undoneIDs ?? []
+        return gone.isEmpty ? entries : entries.filter { !gone.contains($0.assetID) }
+    }
 }
 
 struct AppSettings: Codable, Hashable {

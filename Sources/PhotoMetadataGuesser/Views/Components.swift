@@ -258,3 +258,91 @@ struct NumberField: View {
             }
     }
 }
+
+/// A year you can type or pick from a drop-down list (a standard Mac combo box). A typed year is
+/// used as soon as it's a full year in range, so it isn't lost by clicking somewhere else.
+struct YearComboBox: NSViewRepresentable {
+    var year: Int
+    var range: ClosedRange<Int>
+    /// Change it to put the year back in the box even while it's being typed in (e.g. after Cancel).
+    var reset = 0
+    var onChange: (Int) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    func makeNSView(context: Context) -> NSComboBox {
+        let box = NSComboBox()
+        box.controlSize = .small
+        box.font = .monospacedDigitSystemFont(ofSize: NSFont.systemFontSize(for: .small), weight: .regular)
+        box.usesDataSource = true
+        box.dataSource = context.coordinator
+        box.delegate = context.coordinator
+        box.numberOfVisibleItems = 12
+        box.completes = true
+        box.setContentHuggingPriority(.required, for: .horizontal)
+        return box
+    }
+
+    func updateNSView(_ box: NSComboBox, context: Context) {
+        let c = context.coordinator
+        let ranged = c.parent.range != range
+        // A new year from outside, or a reset, replaces the text even mid-typing; otherwise typing is left alone.
+        let forced = c.parent.year != year || c.parent.reset != reset
+        c.parent = self
+        if ranged { box.reloadData() }
+        guard box.stringValue != String(year), forced || box.currentEditor() == nil else { return }
+        if box.currentEditor() != nil { box.abortEditing() }
+        box.stringValue = String(year)
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSComboBox, context: Context) -> CGSize? {
+        CGSize(width: 72, height: nsView.intrinsicContentSize.height)
+    }
+
+    @MainActor
+    final class Coordinator: NSObject, NSComboBoxDataSource, NSComboBoxDelegate {
+        var parent: YearComboBox
+        init(_ parent: YearComboBox) { self.parent = parent }
+
+        /// Newest first, like most year pickers.
+        private func year(at index: Int) -> Int { parent.range.upperBound - index }
+
+        func numberOfItems(in comboBox: NSComboBox) -> Int { parent.range.count }
+
+        func comboBox(_ comboBox: NSComboBox, objectValueForItemAt index: Int) -> Any? { String(year(at: index)) }
+
+        func comboBox(_ comboBox: NSComboBox, indexOfItemWithStringValue string: String) -> Int {
+            guard let y = Int(string), parent.range.contains(y) else { return NSNotFound }
+            return parent.range.upperBound - y
+        }
+
+        func comboBox(_ comboBox: NSComboBox, completedString string: String) -> String? {
+            guard !string.isEmpty, string.allSatisfy(\.isNumber) else { return nil }
+            return parent.range.reversed().map(String.init).first { $0.hasPrefix(string) }
+        }
+
+        func comboBoxSelectionDidChange(_ notification: Notification) {
+            guard let box = notification.object as? NSComboBox, box.indexOfSelectedItem >= 0 else { return }
+            commit(year(at: box.indexOfSelectedItem))
+        }
+
+        func controlTextDidChange(_ obj: Notification) {
+            guard let box = obj.object as? NSComboBox else { return }
+            let digits = box.stringValue.filter(\.isNumber)
+            if digits.count == 4, let y = Int(digits), parent.range.contains(y) { commit(y) }
+        }
+
+        func controlTextDidEndEditing(_ obj: Notification) {
+            guard let box = obj.object as? NSComboBox else { return }
+            if let y = Int(box.stringValue.filter(\.isNumber)), parent.range.contains(y) {
+                commit(y)
+            } else {
+                box.stringValue = String(parent.year)   // not a year we can use: put the guess back
+            }
+        }
+
+        private func commit(_ y: Int) {
+            if y != parent.year { parent.onChange(y) }
+        }
+    }
+}

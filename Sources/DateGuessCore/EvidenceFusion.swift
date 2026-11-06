@@ -54,18 +54,21 @@ public enum EvidenceFusion {
         let sigma = max(1.5, width * 0.15 + 1.0)
         let peakSigma = max(1.0, width / 3.0)
 
+        func inside(_ year: Int) -> Double {
+            guard let peak = e.peakYear, !e.isHardConstraint else { return 1 }
+            return 0.6 + 0.4 * gaussian(Double(year - peak), peakSigma)
+        }
         var shape = [Double](repeating: 0, count: count)
         for i in 0..<count {
             let year = options.minYear + i
+            // Tails fall off from the value at the edge, so they never rise above the inside of the
+            // range (they once did past the background prior's 2005, which put empty guesses on 2007).
             if year < lo {
-                shape[i] = e.isHardConstraint ? hardOutsideLikelihood : gaussian(Double(lo - year), sigma)
+                shape[i] = e.isHardConstraint ? hardOutsideLikelihood : inside(lo) * gaussian(Double(lo - year), sigma)
             } else if year > hi {
-                shape[i] = e.isHardConstraint ? hardOutsideLikelihood : gaussian(Double(year - hi), sigma)
+                shape[i] = e.isHardConstraint ? hardOutsideLikelihood : inside(hi) * gaussian(Double(year - hi), sigma)
             } else {
-                shape[i] = 1
-                if let peak = e.peakYear, !e.isHardConstraint {
-                    shape[i] *= 0.6 + 0.4 * gaussian(Double(year - peak), peakSigma)
-                }
+                shape[i] = inside(year)
             }
         }
         if e.isHardConstraint {
@@ -105,7 +108,11 @@ public enum EvidenceFusion {
             for i in 0..<logp.count { logp[i] += extra[i] }
         }
         let probs = normalize(logp)
-        let best = bestIndex(probs)
+        // With only limits ("after 1984", "scanned in 2013") nothing points at a particular year, so
+        // take the middle of what's possible rather than the barely-higher edge of a nearly flat curve.
+        let onlyLimits = !evidence.contains { $0.hasYearInfo && !$0.isHardConstraint }
+            && !(extraLogLikelihood?.contains { $0 != 0 } ?? false)
+        let best = onlyLimits ? interval(probs, lower: 0.5, upper: 0.5).0 : bestIndex(probs)
         let year = options.minYear + best
 
         let (qLo, qHi) = interval(probs, lower: 0.1, upper: 0.9)
@@ -136,7 +143,7 @@ public enum EvidenceFusion {
             year: year, season: season, month: season.representativeMonth, day: 1,
             yearLow: options.minYear + qLo, yearHigh: options.minYear + qHi,
             confidence: hasEvidence ? mass : min(mass, 0.1),
-            seasonIsDefault: seasonIsDefault, hasAnyEvidence: hasEvidence)
+            seasonIsDefault: seasonIsDefault, hasAnyEvidence: hasEvidence, onlyLimits: onlyLimits && hasEvidence)
 
         if options.allowExactMonth, let exact = strongestExactDate(in: evidence + extraExactDateCandidates, year: year) {
             result.month = exact.month

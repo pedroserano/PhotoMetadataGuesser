@@ -9,10 +9,111 @@ struct EventsView: View {
     @State private var openGroup: IdentifiedUUID?
     @State private var showingNewGroup = false
     @State private var suggestions: [GroupSuggestion] = []
+    @State var page: Page = .suggested
+
+    enum Page: String, CaseIterable, Identifiable {
+        case suggested = "Suggested"
+        case confirmed = "Confirmed"
+        var id: String { rawValue }
+    }
 
     var body: some View {
+        Group {
+            switch page {
+            case .suggested: suggestedList
+            case .confirmed: confirmedList
+            }
+        }
+        .toolbar {
+            ToolbarItem(placement: .principal) {
+                Picker("Show", selection: $page) {
+                    ForEach(Page.allCases) { Text($0.rawValue).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .fixedSize()
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    showingNewGroup = true
+                } label: {
+                    Label("New Group", systemImage: "plus")
+                }
+                .help("Gather photos you know go together, and say what you know about them")
+                .disabled(state.undatedSorted.isEmpty)
+            }
+        }
+        .onAppear { suggestions = state.groupSuggestions() }
+        .onChange(of: state.groups) { _, _ in suggestions = state.groupSuggestions() }
+        .modifier(EventDateConfirmations(state: state, active: openGroup == nil))
+        .sheet(item: $editing) { draft in
+            EventEditor(seed: draft.ids)
+        }
+        .sheet(item: $openGroup) { item in
+            GroupSheet(groupID: item.id)
+        }
+        .sheet(isPresented: $showingNewGroup) {
+            PhotoPickerSheet(groupID: nil) { id in openGroup = IdentifiedUUID(id: id) }
+        }
+    }
+
+    /// Events you confirmed, each with one date you can change for all its photos at once.
+    private var confirmedList: some View {
+        let confirmed = state.groups.filter { $0.kind == .sameEvent }
+        let others = state.groups.filter { $0.kind != .sameEvent }
+        return List {
+            Section {
+                ForEach(confirmed) { g in
+                    ConfirmedEventRow(state: state, group: g, onOpen: { openGroup = IdentifiedUUID(id: g.id) })
+                        .contextMenu {
+                            Button("Edit…") { openGroup = IdentifiedUUID(id: g.id) }
+                            Button("Delete Event", role: .destructive) { state.groups.removeAll { $0.id == g.id } }
+                        }
+                }
+            } header: {
+                Text("Confirmed Events")
+            } footer: {
+                Text("Change an event’s year or month here and every photo in it gets the new date, checked for Apply. Photos you already applied keep their date.")
+            }
+            if !others.isEmpty {
+                Section("Groups") {
+                    ForEach(others) { g in
+                        Button {
+                            openGroup = IdentifiedUUID(id: g.id)
+                        } label: {
+                            GroupRow(state: state, group: g)
+                        }
+                        .buttonStyle(.plain)
+                        .contextMenu {
+                            Button("Edit…") { openGroup = IdentifiedUUID(id: g.id) }
+                            Button("Delete", role: .destructive) { state.groups.removeAll { $0.id == g.id } }
+                        }
+                    }
+                }
+            }
+        }
+        .listStyle(.inset)
+        .overlay {
+            if confirmed.isEmpty && others.isEmpty {
+                ContentUnavailableView("No Confirmed Events", systemImage: "square.stack",
+                                       description: Text("Click Same Event on a suggestion, and it shows up here."))
+            }
+        }
+        .navigationSubtitle("\(confirmed.count.formatted()) confirmed")
+    }
+
+    private var suggestedList: some View {
         let events = state.eventSuggestions
-        List {
+        return List {
+            if state.isFindingEvents {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text(events.isEmpty
+                         ? "Comparing your photos to find events. This takes a minute or two."
+                         : "Updating events. These are from last time and may change.")
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.vertical, 4)
+            }
             if !events.isEmpty {
                 Section {
                     ForEach(events.prefix(200), id: \.self) { ids in
@@ -43,55 +144,17 @@ struct EventsView: View {
                     }
                 }
             }
-            Section("Your Events & Groups") {
-                if state.groups.isEmpty {
-                    Text("None yet. Click Same Event above, or New Group to gather photos you know go together.")
-                        .foregroundStyle(.secondary)
-                }
-                ForEach(state.groups) { g in
-                    Button {
-                        openGroup = IdentifiedUUID(id: g.id)
-                    } label: {
-                        GroupRow(state: state, group: g)
-                    }
-                    .buttonStyle(.plain)
-                    .contextMenu {
-                        Button("Edit…") { openGroup = IdentifiedUUID(id: g.id) }
-                        Button("Delete", role: .destructive) { state.groups.removeAll { $0.id == g.id } }
-                    }
-                }
-            }
         }
         .listStyle(.inset)
         .overlay {
-            if events.isEmpty && state.isEstimating && state.groups.isEmpty {
-                ContentUnavailableView("Looking for Events…", systemImage: "square.stack",
-                                       description: Text("Events show up here once photos have been compared."))
+            if events.isEmpty && suggestions.isEmpty && !state.isFindingEvents {
+                ContentUnavailableView(state.isEstimating ? "Looking for Events…" : "No Suggestions", systemImage: "square.stack",
+                                       description: Text(state.isEstimating
+                                           ? "Events show up here once photos have been compared."
+                                           : "Events you’ve confirmed are under Confirmed."))
             }
         }
         .navigationSubtitle(events.isEmpty ? "" : "\(events.count.formatted()) suggested")
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    showingNewGroup = true
-                } label: {
-                    Label("New Group", systemImage: "plus")
-                }
-                .help("Gather photos you know go together, and say what you know about them")
-                .disabled(state.undatedSorted.isEmpty)
-            }
-        }
-        .onAppear { suggestions = state.groupSuggestions() }
-        .onChange(of: state.groups) { _, _ in suggestions = state.groupSuggestions() }
-        .sheet(item: $editing) { draft in
-            EventEditor(seed: draft.ids)
-        }
-        .sheet(item: $openGroup) { item in
-            GroupSheet(groupID: item.id)
-        }
-        .sheet(isPresented: $showingNewGroup) {
-            PhotoPickerSheet(groupID: nil) { id in openGroup = IdentifiedUUID(id: id) }
-        }
     }
 }
 
@@ -180,6 +243,207 @@ struct EventCard: View {
     }
 }
 
+/// A confirmed event with its one date, which can be changed for all its photos at once.
+struct ConfirmedEventRow: View {
+    /// Passed in, not read from the environment (see PersonNameCell).
+    var state: AppState
+    var group: PhotoGroup
+    var onOpen: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Button(action: onOpen) {
+                HStack(spacing: 12) {
+                    Thumbnails(ids: group.assetIDs, side: 44, limit: 4)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(group.name).lineLimit(1)
+                        Text(EventDateControls.detail(state, group))
+                            .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    }
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Edit the event or its photos")
+            Spacer(minLength: 8)
+            EventDateControls(state: state, group: group)
+        }
+        .controlSize(.small)
+        .padding(.vertical, 4)
+    }
+}
+
+/// One date for a whole confirmed event: pick the year and the season or month, then OK. Photos not
+/// yet applied just get the new date; ones already dated in Photos are changed there after asking once
+/// (undoable from History), and the menu can put back the dates they had before.
+struct EventDateControls: View {
+    var state: AppState
+    var group: PhotoGroup
+    /// The year and month being picked; nothing changes until OK.
+    @State private var draft: PendingDate?
+
+    struct PendingDate: Equatable { var year: Int; var month: Int?; var season: Season? }
+
+    /// The event's date as shown: the most common among its photos.
+    struct Shown { var year: Int; var month: Int?; var season: Season?; var text: String; var mixed: Bool }
+
+    static func shown(_ state: AppState, _ group: PhotoGroup) -> Shown? {
+        let estimates = state.openMembers(group).compactMap { state.effectiveEstimate($0) }
+        let mixed = Set(estimates.map(\.displayString)).count > 1
+        if let e = Dictionary(grouping: estimates, by: \.displayString).max(by: { $0.value.count < $1.value.count })?.value.first {
+            return Shown(year: e.year, month: e.usedExactMonth ? e.month : nil, season: e.seasonIsDefault ? nil : e.season,
+                         text: e.displayString, mixed: mixed)
+        }
+        let calendar = Calendar.current
+        let pairs = state.datesInPhotos(group).values
+            .map { (calendar.component(.year, from: $0), calendar.component(.month, from: $0)) }
+        guard let top = Dictionary(grouping: pairs, by: { $0.0 * 12 + $0.1 }).max(by: { $0.value.count < $1.value.count })?.value.first
+        else { return nil }
+        return Shown(year: top.0, month: top.1, season: nil, text: "\(DateEstimate.monthNames[top.1 - 1]) \(top.0)",
+                     mixed: Set(pairs.map { $0.0 * 12 + $0.1 }).count > 1)
+    }
+
+    static func detail(_ state: AppState, _ group: PhotoGroup) -> String {
+        let open = state.openMembers(group).count, applied = state.appliedMembers(group).count
+        let other = state.otherMembers(group).count
+        let given = group.yearFrom != nil && group.yearFrom == group.yearTo
+        var parts = ["\(group.assetIDs.count) photos"]
+        if let shown = shown(state, group) { parts.append(shown.mixed ? "mostly \(shown.text)" : shown.text) }
+        if open > 0 { parts.append(given ? "your date" : "shared guess") }
+        if applied > 0 { parts.append(open == 0 && other == 0 ? "applied" : "\(applied) applied") }
+        if other > 0 { parts.append(open == 0 && applied == 0 ? "dated in Photos" : "\(other) dated in Photos") }
+        return parts.joined(separator: " · ")
+    }
+
+    var body: some View {
+        let open = state.openMembers(group)
+        let applied = state.appliedMembers(group)
+        /// Already dated in Photos: changing these asks first.
+        let inPhotos = applied + state.otherMembers(group)
+        let given = group.yearFrom != nil && group.yearFrom == group.yearTo
+        HStack(spacing: 6) {
+            if let shown = Self.shown(state, group) {
+                let saved = PendingDate(year: shown.year, month: shown.month, season: shown.season)
+                let current = draft ?? saved
+                YearComboBox(year: current.year, range: state.lowestYear...YearBounds.currentYear(), reset: state.eventDateResets) { y in
+                    draft = PendingDate(year: y, month: current.month, season: current.season)
+                }
+                .help("The year for every photo in this event")
+                Menu {
+                    Section("Season") {
+                        ForEach(Season.allCases) { s in
+                            Button {
+                                draft = PendingDate(year: current.year, month: nil, season: s)
+                            } label: {
+                                Label(s.displayName, systemImage: s.symbolName)
+                            }
+                        }
+                    }
+                    Section("Month") {
+                        ForEach(1...12, id: \.self) { m in
+                            Button(DateEstimate.monthNames[m - 1]) {
+                                draft = PendingDate(year: current.year, month: m, season: nil)
+                            }
+                        }
+                    }
+                    if given && !open.isEmpty {
+                        Divider()
+                        Button("Use the Shared Guess") { state.setEventDate(group.id, year: nil, month: nil, season: nil) }
+                    }
+                    if !applied.isEmpty {
+                        Divider()
+                        Button("Undo Applied Dates…") {
+                            state.eventDateRequest = .init(groupID: group.id, count: applied.count, undo: true)
+                        }
+                    }
+                } label: {
+                    Text(current.month.map { DateEstimate.monthNames[max(1, min(12, $0)) - 1] } ?? current.season?.displayName ?? "Season")
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .help("The season or month for every photo in this event")
+                let changed = draft.map { $0 != saved } ?? false
+                Button("OK") {
+                    if let d = draft, d != saved { change(d, open: open, inPhotos: inPhotos) }
+                    draft = nil
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!changed)
+                .help(changed ? (inPhotos.isEmpty ? "Give every photo in this event this date"
+                                 : "Set this date; you’ll be asked once before photos in Photos change")
+                      : "Pick a year and a month or season, then click OK")
+                Button {
+                    draft = nil
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(.secondary)
+                .help("Keep the date it has")
+                .opacity(changed ? 1 : 0)
+                .disabled(!changed)
+            } else {
+                Text("Photos not found").foregroundStyle(.secondary)
+                    .help("Its photos are no longer in your Photos library")
+            }
+        }
+        .disabled(state.isApplying)
+    }
+
+    private func change(_ p: PendingDate, open: [String], inPhotos: [String]) {
+        if !open.isEmpty { state.setEventDate(group.id, year: p.year, month: p.month, season: p.season) }
+        if !inPhotos.isEmpty {
+            state.eventDateRequest = .init(groupID: group.id, year: p.year, month: p.month, season: p.season, count: inPhotos.count)
+        }
+    }
+}
+
+/// Asks before an event's dates are changed or put back in Photos. Attached outside lists, since an
+/// alert from inside a list row doesn't reliably appear.
+struct EventDateConfirmations: ViewModifier {
+    var state: AppState
+    /// False while a sheet with its own confirmations is showing.
+    var active = true
+
+    func body(content: Content) -> some View {
+        let request = active ? state.eventDateRequest : nil
+        content.alert(title(request), isPresented: Binding(
+            get: { request != nil },
+            set: { shown in
+                // Dismissed without a choice (Escape): treat as Cancel.
+                if !shown, state.eventDateRequest != nil { cancel() }
+            })) {
+            if let r = request {
+                Button(r.undo ? "Undo Applied Dates" : "Change in Photos") {
+                    state.eventDateRequest = nil
+                    if r.undo {
+                        state.undoAppliedDates(r.groupID)
+                    } else {
+                        state.changeAppliedDates(r.groupID, year: r.year, month: r.month, season: r.season)
+                    }
+                }
+            }
+            Button("Cancel", role: .cancel) { cancel() }
+        } message: {
+            Text(request?.undo == true
+                 ? "Each photo gets back the date it had before this app changed it. Photos whose date you changed in Photos yourself are left alone."
+                 : "They’re already dated in your Photos library, so this changes them there. You can undo it from History.")
+        }
+    }
+
+    private func cancel() {
+        state.eventDateRequest = nil
+        state.eventDateResets += 1
+    }
+
+    private func title(_ r: AppState.EventDateRequest?) -> String {
+        guard let r else { return "" }
+        if r.undo { return "Put back the earlier dates of \(r.count) photos?" }
+        let when = r.month.map { "\(DateEstimate.monthNames[$0 - 1]) \(r.year)" } ?? r.season.map { "\($0.displayName) \(r.year)" } ?? String(r.year)
+        return "Change the date of \(r.count) photos in Photos to \(when)?"
+    }
+}
+
 /// A saved event or group in the list.
 struct GroupRow: View {
     /// Passed in, not read from the environment (see PersonNameCell).
@@ -222,9 +486,10 @@ struct GroupSheet: View {
         let group = state.groups.first { $0.id == groupID }
         VStack(spacing: 0) {
             if let group {
-                HSplitView {
+                HStack(spacing: 0) {
                     GroupEditor(groupID: groupID)
-                        .frame(minWidth: 340, idealWidth: 380, maxWidth: 420)
+                        .frame(width: 370)
+                    Divider()
                     VStack(alignment: .leading, spacing: 0) {
                         HStack {
                             Text("\(group.assetIDs.count) photos").font(.headline)
@@ -243,7 +508,7 @@ struct GroupSheet: View {
                                 .padding(12)
                         }
                     }
-                    .frame(minWidth: 320)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
             Divider()
@@ -259,27 +524,29 @@ struct GroupSheet: View {
             .padding(14)
         }
         .frame(width: 900, height: 600)
+        .modifier(EventDateConfirmations(state: state, active: !adding))
         .sheet(isPresented: $adding) {
             PhotoPickerSheet(groupID: groupID) { _ in }
         }
     }
 }
 
-/// A grid of undated photos; click to select.
+/// A grid of photos; click to select. Shows every photo, including ones already dated here (a rescan
+/// leaves those out of the undated list, but they're still in their events).
 struct PhotoGrid: View {
     @Environment(AppState.self) private var state
     var ids: [String]
     @Binding var selected: Set<String>
 
     var body: some View {
+        let applied = state.appliedIDs
         LazyVGrid(columns: [GridItem(.adaptive(minimum: 110, maximum: 140), spacing: 10)], spacing: 10) {
             ForEach(ids, id: \.self) { id in
-                if let photo = state.photo(id) {
-                    GroupPhotoCell(photo: photo, isSelected: selected.contains(id), groupName: nil)
-                        .onTapGesture {
-                            if selected.contains(id) { selected.remove(id) } else { selected.insert(id) }
-                        }
-                }
+                GroupPhotoCell(assetID: id, photo: state.photo(id), isSelected: selected.contains(id),
+                               applied: applied.contains(id))
+                    .onTapGesture {
+                        if selected.contains(id) { selected.remove(id) } else { selected.insert(id) }
+                    }
             }
         }
     }
@@ -359,12 +626,13 @@ struct PhotoPickerSheet: View {
 }
 
 struct GroupPhotoCell: View {
-    var photo: UndatedPhoto
+    var assetID: String
+    var photo: UndatedPhoto?
     var isSelected: Bool
-    var groupName: String?
+    var applied = false
 
     var body: some View {
-        AssetThumbnail(assetID: photo.id, side: 120, height: 100, cornerRadius: 8)
+        AssetThumbnail(assetID: assetID, side: 120, height: 100, cornerRadius: 8)
             .overlay(alignment: .bottomTrailing) {
                 Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
                     .font(.title3)
@@ -372,12 +640,26 @@ struct GroupPhotoCell: View {
                     .shadow(radius: 2)
                     .padding(5)
             }
+            .overlay(alignment: .topLeading) {
+                if applied {
+                    Label("Applied", systemImage: "checkmark.seal.fill")
+                        .font(.caption2)
+                        .padding(.horizontal, 5).padding(.vertical, 2)
+                        .background(.regularMaterial, in: Capsule())
+                        .padding(5)
+                }
+            }
             .overlay(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .strokeBorder(isSelected ? Theme.accent : .clear, lineWidth: 3)
             )
             .contentShape(Rectangle())
-            .help(photo.albums.isEmpty ? photo.filename : "\(photo.filename)\nAlbums: \(photo.albums.joined(separator: ", "))")
+            .help(help)
+    }
+
+    private var help: String {
+        guard let photo else { return applied ? "Already dated with this app" : "" }
+        return photo.albums.isEmpty ? photo.filename : "\(photo.filename)\nAlbums: \(photo.albums.joined(separator: ", "))"
     }
 }
 
@@ -407,56 +689,36 @@ struct GroupEditor: View {
                     }
                     .pickerStyle(.radioGroup)
                 }
-                Section("What you know") {
-                    TextField("Notes", text: group.hint, prompt: Text("e.g. Lake Tahoe trip, late 70s"), axis: .vertical)
-                        .lineLimit(1...3)
-                    LabeledContent("Years") {
-                        HStack {
-                            NumberField(title: "From", value: group.yearFrom, range: YearBounds.earliestPhotoYear...YearBounds.currentYear())
-                            Text("to")
-                            NumberField(title: "To", value: group.yearTo, range: YearBounds.earliestPhotoYear...YearBounds.currentYear())
+                if group.wrappedValue.kind == .sameEvent {
+                    Section {
+                        LabeledContent("Date") {
+                            EventDateControls(state: state, group: group.wrappedValue)
                         }
+                        TextField("Notes", text: group.hint, prompt: Text("e.g. At the lake"), axis: .vertical)
+                            .lineLimit(1...3)
+                    } header: {
+                        Text("When")
+                    } footer: {
+                        Text("Every photo in the event gets this date. Ones already applied are changed in Photos after asking.")
                     }
-                    Picker("Season", selection: group.season) {
-                        Text("Unknown").tag(Season?.none)
-                        ForEach(Season.allCases) { s in
-                            Label(s.displayName, systemImage: s.symbolName).tag(Season?.some(s))
-                        }
-                    }
-                }
-                Section {
-                    ForEach(group.people) { $hint in
-                        HStack {
-                            Text(state.people.first { $0.id == hint.personID }?.name ?? "Unknown person")
-                            Spacer()
-                            Text("about").foregroundStyle(.secondary)
-                            NumberField(title: "age", value: $hint.approximateAge, range: 0...110, width: 50)
-                            Button {
-                                group.wrappedValue.people.removeAll { $0.id == hint.id }
-                            } label: {
-                                Image(systemName: "minus.circle")
-                            }
-                            .buttonStyle(.borderless)
-                            .help("Remove")
-                        }
-                    }
-                    Menu {
-                        if state.people.isEmpty {
-                            Text("Import people under People first")
-                        }
-                        ForEach(state.people) { person in
-                            Button(person.name) {
-                                group.wrappedValue.people.append(GroupPersonHint(personID: person.id))
+                } else {
+                    Section("What you know") {
+                        TextField("Notes", text: group.hint, prompt: Text("e.g. Lake Tahoe trip, late 70s"), axis: .vertical)
+                            .lineLimit(1...3)
+                        LabeledContent("Years") {
+                            HStack {
+                                NumberField(title: "From", value: group.yearFrom, range: YearBounds.earliestPhotoYear...YearBounds.currentYear())
+                                Text("to")
+                                NumberField(title: "To", value: group.yearTo, range: YearBounds.earliestPhotoYear...YearBounds.currentYear())
                             }
                         }
-                    } label: {
-                        Label("Add Person", systemImage: "person.badge.plus")
+                        Picker("Season", selection: group.season) {
+                            Text("Unknown").tag(Season?.none)
+                            ForEach(Season.allCases) { s in
+                                Label(s.displayName, systemImage: s.symbolName).tag(Season?.some(s))
+                            }
+                        }
                     }
-                    .fixedSize()
-                } header: {
-                    Text("Who’s in these photos")
-                } footer: {
-                    Text("Ages are optional.")
                 }
             }
             .formStyle(.grouped)

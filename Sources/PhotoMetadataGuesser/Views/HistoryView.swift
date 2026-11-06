@@ -39,7 +39,8 @@ struct HistoryView: View {
                         } header: {
                             HStack {
                                 Text(batch.date.formatted(date: .long, time: .shortened))
-                                Text("· \(batch.entries.count.formatted()) photos" + (batch.undone ? " · undone" : ""))
+                                Text("· \(batch.entries.count.formatted()) photos" + (batch.undone ? " · undone"
+                                     : (batch.undoneIDs?.isEmpty == false ? " · \(batch.undoneIDs!.count) put back" : "")))
                                     .foregroundStyle(.secondary)
                                 Spacer()
                                 if !batch.undone {

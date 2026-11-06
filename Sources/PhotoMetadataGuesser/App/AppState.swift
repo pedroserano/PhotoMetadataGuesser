@@ -53,6 +53,8 @@ final class AppState {
     /// Suggestions the user said aren't one event (keyed by `eventKey`).
     var dismissedEvents: Set<String> { didSet { store.save(dismissedEvents, to: "dismissedEvents"); refreshEventSuggestions() } }
     @ObservationIgnored private var allEventClusters: [[String]] = []
+    /// Comparing every photo for events takes a minute or two on a large library.
+    var isFindingEvents = false
     @ObservationIgnored private var printsSaveTask: Task<Void, Never>?
     @ObservationIgnored private var linksTask: Task<Void, Never>?
     var isImportingPeople = false
@@ -96,8 +98,11 @@ final class AppState {
         analyses = store.load([String: PhotoAnalysis].self, from: "analyses") ?? [:]
         decisions = store.load([String: ReviewDecision].self, from: "decisions") ?? [:]
         journal = store.load([ApplyBatch].self, from: "journal") ?? []
+        // Last launch's events, so they show right away while they're worked out again.
+        allEventClusters = store.load([[String]].self, from: "eventClusters") ?? []
         authorization = PhotoLibraryService.shared.authorizationStatus
         refreshUndatedList()
+        refreshEventSuggestions()
         recomputeEstimates()
         if isAuthorized {
             loadAlbums()
@@ -133,7 +138,7 @@ final class AppState {
 
     var appliedIDs: Set<String> {
         var ids = Set<String>()
-        for batch in journal where !batch.undone { ids.formUnion(batch.entries.map(\.assetID)) }
+        for batch in journal { ids.formUnion(batch.liveEntries.map(\.assetID)) }
         return ids
     }
 
@@ -307,6 +312,7 @@ final class AppState {
         }
         let limits = photoLimits
         limitsUsedForEvents = limits
+        isFindingEvents = !packed.isEmpty
         linksTask = Task.detached(priority: .utility) {
             let prints = packed.mapValues(EventLinks.unpack)
             let links = EventLinks.find(order: order, prints: prints, people: who)
@@ -320,6 +326,8 @@ final class AppState {
                 self.eventLinks = links
                 self.referenceClues = clues
                 self.allEventClusters = events
+                self.store.save(events, to: "eventClusters")
+                self.isFindingEvents = false
                 self.refreshEventSuggestions()
                 self.recomputeEstimates()
             }
@@ -605,8 +613,10 @@ final class AppState {
         guard !isApplying, !batch.undone else { return }
         isApplying = true
         applyProgress = (0, batch.entries.count)
+        var live = batch
+        live.entries = batch.liveEntries
         Task {
-            let result = await DateWriter.undo(batch) { done, total in
+            let result = await DateWriter.undo(live) { done, total in
                 await MainActor.run { self.applyProgress = (done, total) }
             }
             if let idx = self.journal.firstIndex(where: { $0.id == batch.id }) {
@@ -620,7 +630,138 @@ final class AppState {
         }
     }
 
+    // MARK: Applied events
+
+    /// This photo's changes by this app still in effect, oldest first.
+    func liveEntries(_ id: String) -> [JournalEntry] {
+        journal.reversed().flatMap { $0.liveEntries.filter { $0.assetID == id } }
+    }
+
+    /// The photos of a saved event that this app has already dated in Photos.
+    func appliedMembers(_ group: PhotoGroup) -> [String] {
+        let applied = appliedIDs
+        return group.assetIDs.filter(applied.contains)
+    }
+
+    /// A change to an event's dates in Photos, waiting for the user to confirm (`EventDateConfirmations`).
+    struct EventDateRequest: Identifiable {
+        let id = UUID()
+        var groupID: UUID
+        var year = 0
+        var month: Int?
+        var season: Season?
+        var count: Int
+        /// Put back the dates from before, instead of setting a new one.
+        var undo = false
+    }
+
+    var eventDateRequest: EventDateRequest?
+    /// Bumped when a request is cancelled, so the year boxes show the event's date again.
+    var eventDateResets = 0
+
+    /// An event's photos that are neither waiting for a date here nor dated by this app: dated in Photos
+    /// some other way, or left out of a later scan. They can still be redated from the event.
+    func otherMembers(_ group: PhotoGroup) -> [String] {
+        let open = Set(openMembers(group)), applied = appliedIDs
+        let rest = group.assetIDs.filter { !open.contains($0) && !applied.contains($0) }
+        // One fetch for all of them, not one per photo.
+        let unknown = rest.filter { libraryDates[$0] == nil }
+        if !unknown.isEmpty {
+            let found = PhotoLibraryService.shared.assets(for: unknown)
+            for id in unknown { libraryDates[id] = .some(found[id]?.creationDate) }
+        }
+        return rest.filter { libraryDate($0) != nil }
+    }
+
+    @ObservationIgnored private var libraryDates: [String: Date?] = [:]
+
+    /// A photo's date in Photos right now (cached until this app changes dates; nil if it's gone).
+    func libraryDate(_ id: String) -> Date? {
+        if let cached = libraryDates[id] { return cached }
+        let date = PhotoLibraryService.shared.assets(for: [id])[id]?.creationDate
+        libraryDates[id] = .some(date)
+        return date
+    }
+
+    /// The date each of an event's photos has in Photos: what this app applied, or what Photos has.
+    func datesInPhotos(_ group: PhotoGroup) -> [String: Date] {
+        var out: [String: Date] = [:]
+        for id in appliedMembers(group) { if let d = liveEntries(id).last?.newDate { out[id] = d } }
+        for id in otherMembers(group) { if let d = libraryDate(id) { out[id] = d } }
+        return out
+    }
+
+    /// Noon on the 1st of the month, like dates applied from guesses.
+    nonisolated static func appliedDate(year: Int, month: Int, calendar: Calendar = .current) -> Date? {
+        calendar.date(from: DateComponents(year: year, month: max(1, min(12, month)), day: 1, hour: 12))
+    }
+
+    /// Gives an event's photos that are already dated in Photos (by this app or otherwise) a new date
+    /// there, undoable from History. A photo whose date changed in Photos since this app last saw it is
+    /// left alone. Without a month or a season, each keeps the month it has.
+    func changeAppliedDates(_ groupID: UUID, year: Int, month: Int?, season: Season?) {
+        guard !isApplying, let group = groups.first(where: { $0.id == groupID }) else { return }
+        let calendar = Calendar.current
+        let changes: [DateWriter.Change] = datesInPhotos(group).sorted { $0.key < $1.key }.compactMap { id, current in
+            let keep = calendar.component(.month, from: current)
+            guard let date = Self.appliedDate(year: year, month: month ?? season?.representativeMonth ?? keep) else { return nil }
+            return DateWriter.Change(assetID: id, date: date, requireUnchanged: true, expectedCurrentDate: current)
+        }
+        guard !changes.isEmpty else { return }
+        isApplying = true
+        applyProgress = (0, changes.count)
+        Task {
+            let batch = await DateWriter.apply(changes) { done, total in
+                await MainActor.run { self.applyProgress = (done, total) }
+            }
+            self.finishWrite(batch, verb: "Changed")
+        }
+    }
+
+    /// Puts back the dates an event's photos had before this app changed them, and marks those changes
+    /// undone in History. Photos whose date was changed in Photos since are left alone.
+    func undoAppliedDates(_ groupID: UUID) {
+        guard !isApplying, let group = groups.first(where: { $0.id == groupID }) else { return }
+        var changes: [DateWriter.Change] = []
+        var noOriginal = 0
+        for id in appliedMembers(group) {
+            let entries = liveEntries(id)
+            guard let current = entries.last?.newDate else { continue }
+            guard let original = entries.first?.previousDate else { noOriginal += 1; continue }
+            changes.append(DateWriter.Change(assetID: id, date: original, requireUnchanged: true, expectedCurrentDate: current))
+        }
+        guard !changes.isEmpty else {
+            if noOriginal > 0 { banner = "These photos had no date before, so there’s nothing to put back." }
+            return
+        }
+        isApplying = true
+        applyProgress = (0, changes.count)
+        Task {
+            let result = await DateWriter.apply(changes) { done, total in
+                await MainActor.run { self.applyProgress = (done, total) }
+            }
+            let restored = Set(result.entries.map(\.assetID))
+            var copy = self.journal
+            for i in copy.indices where !copy[i].undone {
+                let mine = Set(copy[i].entries.map(\.assetID)).intersection(restored)
+                guard !mine.isEmpty else { continue }
+                copy[i].undoneIDs = (copy[i].undoneIDs ?? []).union(mine)
+                if copy[i].liveEntries.isEmpty { copy[i].undone = true }
+            }
+            self.journal = copy
+            self.libraryDates = [:]
+            self.isApplying = false
+            self.applyProgress = nil
+            self.refreshUndatedList()
+            let back = restored.filter { self.scan.undated[$0] == nil }.count
+            self.banner = "Put back the earlier dates of \(restored.count.formatted()) photos."
+                + (result.failures.isEmpty ? "" : " \(result.failures.count) were left alone.")
+                + (back == 0 ? "" : " Scan again to review them.")
+        }
+    }
+
     private func finishWrite(_ batch: ApplyBatch, verb: String) {
+        libraryDates = [:]
         if !batch.entries.isEmpty { journal.insert(batch, at: 0) }
         var copy = decisions
         for entry in batch.entries { copy[entry.assetID]?.selected = false }
@@ -750,6 +891,7 @@ final class AppState {
 
     /// Called whenever the app comes to the front.
     func appBecameActive() {
+        libraryDates = [:]   // dates may have been changed in Photos meanwhile
         guard expectingPhotosChanges || Date().timeIntervalSince(lastQuietRefresh) > 15 * 60 else { return }
         let retry = expectingPhotosChanges
         expectingPhotosChanges = false
@@ -977,6 +1119,37 @@ final class AppState {
         decisions = copy
         refreshEventSuggestions()
         return group
+    }
+
+    /// Undated photos in a saved event that this app hasn't dated yet (the ones a new date can change).
+    func openMembers(_ group: PhotoGroup) -> [String] {
+        let applied = appliedIDs
+        return group.assetIDs.filter { scan.undated[$0] != nil && !applied.contains($0) }
+    }
+
+    /// Gives every photo in a confirmed event one new date and checks them for Apply. A nil year
+    /// clears the date you gave, so they go back to the event's shared guess from all their clues.
+    func setEventDate(_ groupID: UUID, year: Int?, month: Int?, season: Season?) {
+        guard let i = groups.firstIndex(where: { $0.id == groupID }) else { return }
+        var group = groups[i]
+        // The hint holds the month ("July 1987") only when the app wrote it; keep the user's own notes.
+        let autoHint = group.hint.isEmpty || DateEstimate.monthNames.contains { group.hint.hasPrefix($0 + " ") }
+        group.yearFrom = year
+        group.yearTo = year
+        group.season = month == nil ? season : nil
+        if autoHint { group.hint = month.flatMap { m in year.map { "\(DateEstimate.monthNames[m - 1]) \($0)" } } ?? "" }
+        groups[i] = group
+        var copy = decisions
+        for id in openMembers(group) {
+            var d = copy[id] ?? ReviewDecision()
+            guard !d.ignored else { continue }
+            d.overrideYear = year
+            d.overrideMonth = year == nil ? nil : month
+            d.overrideSeason = year == nil || month != nil ? nil : season
+            d.selected = true
+            copy[id] = d
+        }
+        decisions = copy
     }
 
     // MARK: Cameras
