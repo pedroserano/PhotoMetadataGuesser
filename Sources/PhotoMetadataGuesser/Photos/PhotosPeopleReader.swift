@@ -95,6 +95,44 @@ enum PhotosPeopleReader {
         return (people, faces, references)
     }
 
+    /// The camera (make and model) of every photo that records one, for learning each camera's clock.
+    static func readCameras(libraryURL: URL) throws -> [String: String] {
+        let handle = try open(libraryURL)
+        defer { sqlite3_close(handle) }
+        let extended = columns(of: "ZEXTENDEDATTRIBUTES", in: handle)
+        guard extended.contains("ZASSET"), extended.contains("ZCAMERAMODEL") else { return [:] }
+        let make = extended.contains("ZCAMERAMAKE") ? "coalesce(e.ZCAMERAMAKE, '')" : "''"
+        let trashed = columns(of: "ZASSET", in: handle).contains("ZTRASHEDSTATE") ? "WHERE coalesce(a.ZTRASHEDSTATE, 0) = 0" : ""
+        let sql = """
+            SELECT a.ZUUID, \(make), e.ZCAMERAMODEL
+            FROM ZEXTENDEDATTRIBUTES e
+            JOIN ZASSET a ON a.Z_PK = e.ZASSET
+            \(trashed)
+            """
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+            throw ReadError.unexpectedFormat(String(cString: sqlite3_errmsg(handle)))
+        }
+        defer { sqlite3_finalize(statement) }
+        var out: [String: String] = [:]
+        var names: [String: String] = [:]
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let asset = text(statement, 0), let model = text(statement, 2)?.trimmingCharacters(in: .whitespaces),
+                  !model.isEmpty else { continue }
+            let maker = text(statement, 1)?.trimmingCharacters(in: .whitespaces) ?? ""
+            let key = maker + "|" + model
+            // "Canon Canon EOS 5D" → "Canon EOS 5D"; one shared string per camera.
+            let name = names[key] ?? {
+                let first = maker.split(separator: " ").first.map(String.init) ?? ""
+                let n = first.isEmpty || model.localizedCaseInsensitiveContains(first) ? model : "\(first) \(model)"
+                names[key] = n
+                return n
+            }()
+            out[asset + "/L0/001"] = name
+        }
+        return out
+    }
+
     private static func readReferences(_ handle: OpaquePointer, clusters: Set<String>, excluding undated: Set<String>,
                                        perGroup: Int) throws -> [String: ReferenceCandidate] {
         let faceColumns = columns(of: "ZDETECTEDFACE", in: handle)

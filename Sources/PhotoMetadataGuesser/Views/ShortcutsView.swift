@@ -22,13 +22,13 @@ struct ShortcutsView: View {
     }
 
     static let sections: [Section] = [
-        Section(title: "Selecting photos in Review", items: [
+        Section(title: "Selecting photos (Undated Photos and Places)", items: [
             Shortcut(keys: ["Click"], action: "Select a photo"),
             Shortcut(keys: ["⌘", "Click"], action: "Add or remove a photo from the selection"),
             Shortcut(keys: ["⇧", "Click"], action: "Select every photo in between"),
             Shortcut(keys: ["Esc"], action: "Deselect all"),
         ]),
-        Section(title: "Checking photos for dating", items: [
+        Section(title: "Checking photos to change", items: [
             Shortcut(keys: ["Space"], action: "Check the selected photos (unchecks them if all are checked)"),
             Shortcut(keys: ["⇧", "Click ✓"], action: "Check or uncheck every photo in between"),
             Shortcut(keys: ["⌘", "A"], action: "Check all shown photos"),
@@ -38,6 +38,10 @@ struct ShortcutsView: View {
             Shortcut(keys: ["⌘", "D"], action: "Give all checked photos one date"),
             Shortcut(keys: ["Return"], action: "Confirm the date or dialog"),
             Shortcut(keys: ["Esc"], action: "Cancel"),
+        ]),
+        Section(title: "Places", items: [
+            Shortcut(keys: ["⌘", "L"], action: "Give all checked photos one place"),
+            Shortcut(keys: ["Return"], action: "Pick the first Apple Maps suggestion"),
         ]),
         Section(title: "Photos", items: [
             Shortcut(keys: ["R"], action: "Rotate the selected photos 90° clockwise in Photos (Review, photo details, and group photos in Events)"),

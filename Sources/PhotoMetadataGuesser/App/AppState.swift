@@ -10,6 +10,8 @@ import DateGuessCore
 final class AppState {
     private let store = JSONStore.shared
     private let library = PhotoLibraryService.shared
+    /// The Places tab's guesses and choices.
+    @ObservationIgnored let places = PlacesState()
 
     // MARK: Persistent state
 
@@ -117,6 +119,8 @@ final class AppState {
             }
         }
         if !featurePrints.isEmpty { recomputeLinks() }
+        places.app = self
+        if places.scan.lastScan != nil { places.recompute() }
         // Picks up names added in Photos since last time, without asking for the library again.
         hasSavedLibrary = store.load(Data.self, from: "photosLibrary").map { !$0.isEmpty } ?? false
         refreshFromPhotos()
@@ -224,6 +228,7 @@ final class AppState {
                 // A new scan is an explicit request to analyze, so it lifts a Stop.
                 self.settings.backgroundPaused = nil
                 self.startEstimation()
+                self.places.startScan()
             } catch is CancellationError {
                 self.banner = "Scan stopped."
             } catch {
@@ -263,12 +268,14 @@ final class AppState {
         guard !isEstimating, settings.backgroundPaused != true else { recomputeLinks(); return }
         let undatedMissing = undatedSorted.map(\.id).filter { featurePrints[$0] == nil && analyses[$0] != nil }
         let referencesMissing = trustedReferenceIDs.filter { featurePrints[$0] == nil }
-        let missing = undatedMissing + referencesMissing
-        guard !missing.isEmpty else { recomputeLinks(); return }
+        let have = Set(undatedMissing + referencesMissing)
+        let placesMissing = places.fingerprintQueue(have: featurePrints).filter { !have.contains($0) }
+        let missing = undatedMissing + referencesMissing + placesMissing
+        guard !missing.isEmpty else { recomputeLinks(); places.recompute(); return }
         isEstimating = true
-        estimationProgress = EstimationProgress(phase: undatedMissing.isEmpty ? "Comparing with your dated photos…"
-                                                    : "Comparing photos to find ones from the same event…",
-                                                total: missing.count)
+        let phase = !undatedMissing.isEmpty ? "Comparing photos to find ones from the same event…"
+            : !referencesMissing.isEmpty ? "Comparing with your dated photos…" : "Learning what your places look like…"
+        estimationProgress = EstimationProgress(phase: phase, total: missing.count)
         estimateTask = Task {
             await EstimationEngine.fingerprints(
                 for: missing,
@@ -281,6 +288,7 @@ final class AppState {
             self.estimationProgress = nil
             self.saveFeaturePrintsNow()
             self.recomputeLinks()
+            self.places.recompute()
         }
     }
 
@@ -1047,6 +1055,7 @@ final class AppState {
             let scoped = libraryURL.startAccessingSecurityScopedResource()
             defer { if scoped { libraryURL.stopAccessingSecurityScopedResource() } }
             let result = Result { try PhotosPeopleReader.read(libraryURL: libraryURL, facesFor: undated) }
+            let cameras = (try? PhotosPeopleReader.readCameras(libraryURL: libraryURL)) ?? [:]
             await MainActor.run {
                 self.isImportingPeople = false
                 switch result {
@@ -1054,6 +1063,7 @@ final class AppState {
                     if !quietly { self.banner = error.localizedDescription }
                 case .success(let read):
                     let before = Set(self.taggedPeople.map { "\($0.id)|\($0.name)|\($0.assetIDs.count)" })
+                    if !cameras.isEmpty { self.places.setCameras(cameras) }
                     self.detectedFaces = read.faces
                     self.referenceCandidates = read.references
                     self.mergeTagged(read.people, undated: undated, quietly: quietly)
@@ -1342,6 +1352,7 @@ final class AppState {
     func saveEverything() {
         store.save(analyses, to: "analyses")
         store.save(decisions, to: "decisions")
+        places.saveNow()
         store.flush()
     }
 }

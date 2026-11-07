@@ -3,13 +3,14 @@ import SwiftUI
 import DateGuessCore
 
 enum SidebarItem: String, CaseIterable, Identifiable {
-    case review, history, events, people, cameras
+    case review, places, history, events, people, cameras
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
         case .review: return "Undated Photos"
+        case .places: return "Places"
         case .history: return "History"
         case .events: return "Events"
         case .people: return "People"
@@ -20,6 +21,7 @@ enum SidebarItem: String, CaseIterable, Identifiable {
     var icon: String {
         switch self {
         case .review: return "photo.on.rectangle"
+        case .places: return "mappin.and.ellipse"
         case .history: return "clock.arrow.circlepath"
         case .events: return "square.stack"
         case .people: return "person.2"
@@ -27,7 +29,7 @@ enum SidebarItem: String, CaseIterable, Identifiable {
         }
     }
 
-    static let library: [SidebarItem] = [.review, .history]
+    static let library: [SidebarItem] = [.review, .places, .history]
     static let clues: [SidebarItem] = [.events, .people, .cameras]
 }
 
@@ -103,6 +105,7 @@ struct ContentView: View {
     private func badge(for item: SidebarItem) -> Int {
         switch item {
         case .review: return state.undatedSorted.count
+        case .places: return state.places.guesses.values.filter { $0.level == .high }.count
         case .events: return state.eventSuggestions.count
         case .people: return state.people.count
         case .history, .cameras: return 0
@@ -116,6 +119,7 @@ struct ContentView: View {
         Group {
             switch item {
             case .review: ReviewView(goToPeople: { selection = .people })
+            case .places: PlacesView()
             case .history: HistoryView()
             case .events: EventsView()
             case .people: PeopleView()
