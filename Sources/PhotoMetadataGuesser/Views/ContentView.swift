@@ -70,6 +70,7 @@ struct ContentView: View {
             }
         }
         .overlay(alignment: .bottom) { BannerView() }
+        .photoZoomHost()
         .sheet(isPresented: $showShortcuts) { ShortcutsView() }
         // / shows the shortcuts, unless another sheet or dialog is in front.
         .onHelpKey {

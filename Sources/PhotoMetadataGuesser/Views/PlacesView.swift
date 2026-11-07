@@ -675,7 +675,7 @@ private struct OutingRow: View {
                     Text("\(checked.count.formatted()) checked").font(.caption).foregroundStyle(Theme.accent)
                 }
             }
-            ScrollView(.horizontal, showsIndicators: false) {
+            ThumbnailStrip {
                 LazyHStack(spacing: 6) {
                     ForEach(open.prefix(40), id: \.self) { id in
                         AssetThumbnail(assetID: id, side: 84, cornerRadius: 6)

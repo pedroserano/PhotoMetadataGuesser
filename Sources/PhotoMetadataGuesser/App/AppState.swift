@@ -104,6 +104,7 @@ final class AppState {
         analyses = store.load([String: PhotoAnalysis].self, from: "analyses") ?? [:]
         decisions = store.load([String: ReviewDecision].self, from: "decisions") ?? [:]
         journal = store.load([ApplyBatch].self, from: "journal") ?? []
+        keptShifts = store.load(Set<String>.self, from: "keptShifts") ?? []
         // Last launch's events, so they show right away while they're worked out again.
         allEventClusters = store.load([[String]].self, from: "eventClusters") ?? []
         authorization = PhotoLibraryService.shared.authorizationStatus
@@ -775,6 +776,16 @@ final class AppState {
         return out
     }
 
+    /// The month an event shows: the most common among its photos (their guesses, and the dates of
+    /// those already in Photos). Every photo gets this month when only a year is picked.
+    func eventShownMonth(_ group: PhotoGroup) -> Int? {
+        let calendar = Calendar.current
+        let months = openMembers(group).compactMap { effectiveEstimate($0)?.month }
+            + datesInPhotos(group).values.map { calendar.component(.month, from: $0) }
+        return Dictionary(grouping: months.filter { (1...12).contains($0) }, by: { $0 })
+            .max { $0.value.count != $1.value.count ? $0.value.count < $1.value.count : $0.key > $1.key }?.key
+    }
+
     /// Noon on the 1st of the month, like dates applied from guesses.
     nonisolated static func appliedDate(year: Int, month: Int, calendar: Calendar = .current) -> Date? {
         calendar.date(from: DateComponents(year: year, month: max(1, min(12, month)), day: 1, hour: 12))
@@ -782,13 +793,12 @@ final class AppState {
 
     /// Gives an event's photos that are already dated in Photos (by this app or otherwise) a new date
     /// there, undoable from History. A photo whose date changed in Photos since this app last saw it is
-    /// left alone. Without a month or a season, each keeps the month it has.
+    /// left alone. Every photo gets the same date: without a month or a season, the event's month.
     func changeAppliedDates(_ groupID: UUID, year: Int, month: Int?, season: Season?) {
         guard !isApplying, let group = groups.first(where: { $0.id == groupID }) else { return }
-        let calendar = Calendar.current
+        let sharedMonth = month ?? season?.representativeMonth ?? eventShownMonth(group) ?? 1
         let changes: [DateWriter.Change] = datesInPhotos(group).sorted { $0.key < $1.key }.compactMap { id, current in
-            let keep = calendar.component(.month, from: current)
-            guard let date = Self.appliedDate(year: year, month: month ?? season?.representativeMonth ?? keep) else { return nil }
+            guard let date = Self.appliedDate(year: year, month: sharedMonth) else { return nil }
             return DateWriter.Change(assetID: id, date: date, requireUnchanged: true, expectedCurrentDate: current)
         }
         guard !changes.isEmpty else { return }
@@ -858,6 +868,87 @@ final class AppState {
         banner = "\(verb) \(batch.entries.count.formatted()) photos in your Photos library."
             + (skipped == 0 ? "" : " Skipped \(skipped) whose date was changed in Photos since the last scan.")
             + (failed == 0 ? "" : " \(failed) couldn't be changed.")
+    }
+
+    // MARK: Dates changed outside the app
+
+    /// A photo this app dated whose date in Photos is now different (usually from Image ▸ Adjust Date
+    /// and Time in Photos, which moves every selected photo by the same amount).
+    struct DateShift: Identifiable, Hashable {
+        var assetID: String
+        var appDate: Date
+        var current: Date
+        var id: String { assetID }
+        /// Whole days it moved (negative: earlier).
+        var days: Int { Int((current.timeIntervalSince(appDate) / 86400).rounded()) }
+        var keepKey: String { "\(assetID)|\(Int(appDate.timeIntervalSinceReferenceDate))" }
+    }
+
+    var dateShifts: [DateShift] = []
+    var isCheckingShifts = false
+    /// Shifts the user chose to keep, so they aren't listed again.
+    var keptShifts: Set<String> = [] { didSet { store.save(keptShifts, to: "keptShifts") } }
+
+    /// The date this app last set for each photo it dated (and hasn't undone).
+    nonisolated static func appliedDates(_ journal: [ApplyBatch]) -> [String: Date] {
+        var out: [String: Date] = [:]
+        // Newest batches come first.
+        for batch in journal {
+            for entry in batch.liveEntries where out[entry.assetID] == nil { out[entry.assetID] = entry.newDate }
+        }
+        return out
+    }
+
+    /// Photos whose date no longer matches what this app set; `current` maps id → date in Photos now.
+    nonisolated static func shifts(applied: [String: Date], current: [String: Date], kept: Set<String>) -> [DateShift] {
+        applied.compactMap { id, mine in
+            guard let now = current[id], abs(now.timeIntervalSince(mine)) >= 2 else { return nil }
+            let shift = DateShift(assetID: id, appDate: mine, current: now)
+            return kept.contains(shift.keepKey) ? nil : shift
+        }
+        .sorted { $0.appDate < $1.appDate }
+    }
+
+    func checkShiftedDates() {
+        guard !isCheckingShifts, isAuthorized else { return }
+        isCheckingShifts = true
+        let applied = Self.appliedDates(journal)
+        let kept = keptShifts
+        Task.detached(priority: .userInitiated) {
+            var current: [String: Date] = [:]
+            for chunk in Array(applied.keys).chunked(into: 500) {
+                for (id, asset) in PhotoLibraryService.shared.assets(for: chunk) { current[id] = asset.creationDate }
+            }
+            let found = Self.shifts(applied: applied, current: current, kept: kept)
+            await MainActor.run {
+                self.dateShifts = found
+                self.isCheckingShifts = false
+            }
+        }
+    }
+
+    func keepShiftedDates(_ shifts: [DateShift]) {
+        keptShifts.formUnion(shifts.map(\.keepKey))
+        let gone = Set(shifts.map(\.assetID))
+        dateShifts.removeAll { gone.contains($0.assetID) }
+    }
+
+    /// Gives these photos one exact date in Photos: the 1st of `month` at noon. Skips any changed again
+    /// since the check; undoable from History.
+    func setDateInPhotos(_ shifts: [DateShift], year: Int, month: Int) {
+        guard !isApplying, !shifts.isEmpty, let date = Self.appliedDate(year: year, month: month) else { return }
+        let changes = shifts.map {
+            DateWriter.Change(assetID: $0.assetID, date: date, requireUnchanged: true, expectedCurrentDate: $0.current)
+        }
+        isApplying = true
+        applyProgress = (0, changes.count)
+        Task {
+            let batch = await DateWriter.apply(changes) { done, total in
+                await MainActor.run { self.applyProgress = (done, total) }
+            }
+            self.finishWrite(batch, verb: "Set the date of")
+            self.checkShiftedDates()
+        }
     }
 
     // MARK: Rotation
@@ -1215,6 +1306,11 @@ final class AppState {
     /// Saves photos as one event with the date the user knows: they all get that one date.
     @discardableResult
     func saveEvent(_ ids: [String], name: String, year: Int?, month: Int?, season: Season?) -> PhotoGroup {
+        // A year alone still gives every photo the same date: the month most of their guesses have.
+        let month = year != nil && month == nil && season == nil
+            ? (Dictionary(grouping: ids.compactMap { effectiveEstimate($0)?.month }, by: { $0 })
+                .max { $0.value.count != $1.value.count ? $0.value.count < $1.value.count : $0.key > $1.key }?.key ?? 1)
+            : month
         var group = createGroup(name: name, assetIDs: ids, kind: .sameEvent)
         group.yearFrom = year
         group.yearTo = year
@@ -1255,6 +1351,8 @@ final class AppState {
     func setEventDate(_ groupID: UUID, year: Int?, month: Int?, season: Season?) {
         guard let i = groups.firstIndex(where: { $0.id == groupID }) else { return }
         var group = groups[i]
+        // A year alone still gives every photo the same date: the event's month.
+        let month = year != nil && month == nil && season == nil ? (eventShownMonth(group) ?? 1) : month
         // The hint holds the month ("July 1987") only when the app wrote it; keep the user's own notes.
         let autoHint = group.hint.isEmpty || DateEstimate.monthNames.contains { group.hint.hasPrefix($0 + " ") }
         group.yearFrom = year

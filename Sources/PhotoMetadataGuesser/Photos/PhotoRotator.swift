@@ -232,7 +232,7 @@ private final class KeyHandlerBox {
     var perform: () -> Bool = { false }
 }
 
-private struct KeyCommandModifier: ViewModifier {
+struct KeyCommandModifier: ViewModifier {
     var key: String
     var perform: () -> Bool
     @State private var id = UUID()

@@ -122,7 +122,7 @@ struct EventsView: View {
                 } header: {
                     Text("Suggested Events")
                 } footer: {
-                    Text("Click a photo that doesn’t belong to leave it out. Same Event gives them one shared date and checks them for Apply.")
+                    Text("Click a photo (or press Space over it) to see it bigger. Click × to leave out one that doesn’t belong. Same Event gives them one shared date and checks them for Apply.")
                 }
             }
             if !suggestions.isEmpty {
@@ -177,6 +177,7 @@ struct Thumbnails: View {
         HStack(spacing: 4) {
             ForEach(ids.prefix(limit), id: \.self) { id in
                 AssetThumbnail(assetID: id, side: side, cornerRadius: 5)
+                    .zoomable(id, in: ids)
             }
             if ids.count > limit {
                 Text("+\(ids.count - limit)").font(.caption).foregroundStyle(.secondary)
@@ -204,7 +205,8 @@ struct EventCard: View {
                 Spacer()
                 Button("Not One Event") { state.dismissEvent(ids) }
                     .buttonStyle(.borderless)
-                Button("Set Date…") { onOpen(kept) }
+                Button("Date with Related Photos…") { onOpen(kept) }
+                    .help("Give these a date, and look for more photos from the same event")
                 Button("Same Event") {
                     state.saveEvent(kept, name: sharedGuess.map { "Event, \($0)" } ?? "Event (\(kept.count) photos)",
                                     year: nil, month: nil, season: nil)
@@ -213,19 +215,27 @@ struct EventCard: View {
                 .disabled(kept.count < 2)
                 .help("They’ll share one date, worked out from all their clues together, and be checked for Apply")
             }
-            ScrollView(.horizontal, showsIndicators: false) {
+            ThumbnailStrip {
                 HStack(spacing: 6) {
                     ForEach(ids.prefix(12), id: \.self) { id in
                         let out = excluded.contains(id)
                         AssetThumbnail(assetID: id, side: 80, cornerRadius: 6)
                             .opacity(out ? 0.35 : 1)
+                            .zoomable(id, in: ids)
+                            .help("Click or press Space to see it bigger")
                             .overlay(alignment: .topTrailing) {
-                                if out {
-                                    Image(systemName: "xmark.circle.fill").foregroundStyle(.white, .red).padding(4)
+                                Button {
+                                    if out { excluded.remove(id) } else { excluded.insert(id) }
+                                } label: {
+                                    Image(systemName: out ? "plus.circle.fill" : "xmark.circle.fill")
+                                        .font(.system(size: 15))
+                                        .foregroundStyle(.white, out ? Theme.accent : .black.opacity(0.45))
+                                        .shadow(radius: 1)
+                                        .padding(3)
                                 }
+                                .buttonStyle(.plain)
+                                .help(out ? "Left out. Click to put it back" : "Leave this one out")
                             }
-                            .onTapGesture { if out { excluded.remove(id) } else { excluded.insert(id) } }
-                            .help(out ? "Left out. Click to put it back" : "Click to leave this one out")
                     }
                     if ids.count > 12 { Text("+\(ids.count - 12)").foregroundStyle(.secondary).padding(.horizontal, 6) }
                 }
@@ -369,8 +379,8 @@ struct EventDateControls: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(!changed)
-                .help(changed ? (inPhotos.isEmpty ? "Give every photo in this event this date"
-                                 : "Set this date; you’ll be asked once before photos in Photos change")
+                .help(changed ? (inPhotos.isEmpty ? "Give every photo in this event this same date"
+                                 : "Give every photo in this event this same date; you’ll be asked once before photos in Photos change")
                       : "Pick a year and a month or season, then click OK")
                 Button {
                     draft = nil
@@ -391,6 +401,9 @@ struct EventDateControls: View {
     }
 
     private func change(_ p: PendingDate, open: [String], inPhotos: [String]) {
+        // A year alone still means one date for every photo: the event's month.
+        var p = p
+        if p.month == nil && p.season == nil { p.month = state.eventShownMonth(group) }
         if !open.isEmpty { state.setEventDate(group.id, year: p.year, month: p.month, season: p.season) }
         if !inPhotos.isEmpty {
             state.eventDateRequest = .init(groupID: group.id, year: p.year, month: p.month, season: p.season, count: inPhotos.count)
@@ -524,6 +537,7 @@ struct GroupSheet: View {
             .padding(14)
         }
         .frame(width: 900, height: 600)
+        .photoZoomHost(scope: "group")
         .modifier(EventDateConfirmations(state: state, active: !adding))
         .sheet(isPresented: $adding) {
             PhotoPickerSheet(groupID: groupID) { _ in }
@@ -544,6 +558,7 @@ struct PhotoGrid: View {
             ForEach(ids, id: \.self) { id in
                 GroupPhotoCell(assetID: id, photo: state.photo(id), isSelected: selected.contains(id),
                                applied: applied.contains(id))
+                    .zoomable(id, in: ids, openOnClick: false)
                     .onTapGesture {
                         if selected.contains(id) { selected.remove(id) } else { selected.insert(id) }
                     }
@@ -629,6 +644,7 @@ struct PhotoPickerSheet: View {
         }
         .padding(20)
         .frame(width: 780, height: 600)
+        .photoZoomHost(scope: "picker")
     }
 }
 
@@ -757,10 +773,10 @@ struct EventEditor: View {
             }
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
-                    Text("In this event. Click a photo to leave it out.").font(.headline)
+                    Text("In this event. Click ✓ to leave one out, or the photo to see it bigger.").font(.headline)
                     grid(seed + candidates.filter { included.contains($0) })
                     if !candidates.isEmpty {
-                        Text("Might also be from this event. Click to add.").font(.headline)
+                        Text("Might also be from this event. Click + to add.").font(.headline)
                         grid(candidates.filter { !included.contains($0) })
                     }
                 }
@@ -804,6 +820,7 @@ struct EventEditor: View {
         }
         .padding(20)
         .frame(width: 780, height: 620)
+        .photoZoomHost(scope: "editor")
         .onAppear {
             included = Set(seed)
             candidates = state.eventCandidates(for: seed)
@@ -822,18 +839,23 @@ struct EventEditor: View {
             ForEach(ids, id: \.self) { id in
                 let on = included.contains(id)
                 AssetThumbnail(assetID: id, side: 104, cornerRadius: 8)
-                    .overlay(alignment: .topTrailing) {
-                        Image(systemName: on ? "checkmark.circle.fill" : "plus.circle")
-                            .font(.title3)
-                            .foregroundStyle(on ? Theme.accent : .white)
-                            .shadow(radius: 2)
-                            .padding(5)
-                    }
                     .opacity(on ? 1 : 0.6)
-                    .onTapGesture {
-                        if on { included.remove(id) } else { included.insert(id) }
+                    .zoomable(id, in: ids)
+                    .help((state.effectiveEstimate(id)?.displayString).map { "\($0) · click or press Space to see it bigger" }
+                          ?? "Click or press Space to see it bigger")
+                    .overlay(alignment: .topTrailing) {
+                        Button {
+                            if on { included.remove(id) } else { included.insert(id) }
+                        } label: {
+                            Image(systemName: on ? "checkmark.circle.fill" : "plus.circle")
+                                .font(.title3)
+                                .foregroundStyle(on ? Theme.accent : .white)
+                                .shadow(radius: 2)
+                                .padding(5)
+                        }
+                        .buttonStyle(.plain)
+                        .help(on ? "In this event. Click to leave it out" : "Click to add it to this event")
                     }
-                    .help(state.effectiveEstimate(id)?.displayString ?? "")
             }
         }
     }

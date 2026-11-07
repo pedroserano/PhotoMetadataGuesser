@@ -617,7 +617,7 @@ struct SameEventStrip: View {
                 Text("These look like they’re from the same day or occasion, even if they were scanned at different times.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
-                ScrollView(.horizontal, showsIndicators: false) {
+                ThumbnailStrip {
                     HStack(spacing: 6) {
                         ForEach(matches, id: \.self) { id in
                             VStack(spacing: 2) {

@@ -47,6 +47,53 @@ final class EventDateTests: XCTestCase {
         XCTAssertEqual(state.groups.first?.hint, "At the lake")
     }
 
+    /// Picking only a year still gives every photo of the event the very same date.
+    func testYearAloneGivesEveryPhotoOneDate() {
+        let state = AppState()
+        state.groups = []
+        state.journal = []
+        for id in ["y1", "y2", "y3"] {
+            state.scan.undated[id] = UndatedPhoto(id: id, reason: .noCaptureDateInFile, libraryDate: nil, format: FormatInfo(), albums: [])
+        }
+        let group = state.saveEvent(["y1", "y2", "y3"], name: "Trip", year: 1990, month: 8, season: nil)
+        state.setOverride("y3", year: 1990, season: .winter)   // one drifted to its own season
+        state.setMonth("y2", 3)
+
+        state.setEventDate(group.id, year: 1984, month: nil, season: nil)
+        let months = Set(["y1", "y2", "y3"].map { state.decision($0).overrideMonth })
+        XCTAssertEqual(months.count, 1, "one month for all")
+        XCTAssertNotNil(months.first!)
+        XCTAssertEqual(Set(["y1", "y2", "y3"].map { state.decision($0).overrideYear }), [1984])
+        XCTAssertEqual(Set(["y1", "y2", "y3"].map { state.decision($0).overrideSeason }), [nil], "no season to drift by")
+
+        // Saving an event with only a year does the same.
+        let other = state.saveEvent(["y1", "y2"], name: "Again", year: 1975, month: nil, season: nil)
+        XCTAssertEqual(state.decision("y1").overrideMonth, state.decision("y2").overrideMonth)
+        XCTAssertNotNil(state.decision("y1").overrideMonth)
+        _ = other
+    }
+
+    /// Photos this app dated and that were moved in Photos afterward are found; kept ones aren't.
+    func testFindsDatesChangedInPhotos() {
+        let t = Date(timeIntervalSince1970: 300_000_000)
+        let journal = [
+            ApplyBatch(date: Date(), entries: [JournalEntry(assetID: "p", previousDate: nil, newDate: t)]),
+            ApplyBatch(date: Date().addingTimeInterval(-60), entries: [JournalEntry(assetID: "p", previousDate: nil, newDate: t.addingTimeInterval(-9e6)),
+                                                                   JournalEntry(assetID: "q", previousDate: nil, newDate: t)]),
+            ApplyBatch(date: Date().addingTimeInterval(-120), entries: [JournalEntry(assetID: "r", previousDate: nil, newDate: t)], undone: true),
+        ]
+        let applied = AppState.appliedDates(journal)
+        XCTAssertEqual(applied["p"], t, "the newest date this app set")
+        XCTAssertNil(applied["r"], "undone")
+        let twoYears = t.addingTimeInterval(-730 * 86400)
+        let shifts = AppState.shifts(applied: applied, current: ["p": twoYears, "q": t.addingTimeInterval(1)], kept: [])
+        XCTAssertEqual(shifts.map(\.assetID), ["p"], "a second off doesn't count")
+        XCTAssertEqual(shifts.first?.days, -730)
+        XCTAssertEqual(HistoryView.amount(-730), "2 years earlier")
+        XCTAssertEqual(HistoryView.amount(61), "61 days later")
+        XCTAssertTrue(AppState.shifts(applied: applied, current: ["p": twoYears], kept: [shifts[0].keepKey]).isEmpty)
+    }
+
     /// Photos already dated here drop out of the scan after a rescan, but the event's grid must
     /// still show them (it once showed nothing for such events).
     func testEventGridShowsPhotosNoLongerInTheScan() {

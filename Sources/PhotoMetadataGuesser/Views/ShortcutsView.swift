@@ -43,6 +43,12 @@ struct ShortcutsView: View {
             Shortcut(keys: ["⌘", "L"], action: "Give all checked photos one place"),
             Shortcut(keys: ["Return"], action: "Pick the first Apple Maps suggestion"),
         ]),
+        Section(title: "Seeing a photo bigger (Events)", items: [
+            Shortcut(keys: ["Click"], action: "Show the photo filling the window"),
+            Shortcut(keys: ["Space"], action: "Show the photo under the pointer filling the window"),
+            Shortcut(keys: ["←", "→"], action: "Previous or next photo"),
+            Shortcut(keys: ["Esc"], action: "Back to the thumbnails (Space or a click works too)"),
+        ]),
         Section(title: "Photos", items: [
             Shortcut(keys: ["R"], action: "Rotate the selected photos 90° clockwise in Photos (Review, photo details, and group photos in Events)"),
         ]),

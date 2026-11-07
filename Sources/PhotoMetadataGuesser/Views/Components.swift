@@ -348,3 +348,15 @@ struct YearComboBox: NSViewRepresentable {
         }
     }
 }
+
+/// A row of thumbnails that scrolls sideways only. It takes the height of its thumbnails and never
+/// scrolls or bounces up and down, so scrolling over it moves the page it's on.
+struct ThumbnailStrip<Content: View>: View {
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) { content }
+            .scrollBounceBehavior(.basedOnSize, axes: .vertical)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+}
