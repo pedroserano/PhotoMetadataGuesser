@@ -137,6 +137,51 @@ public enum FormatClues {
     }
 }
 
+// MARK: - Digital photos vs. scans of prints
+
+public enum DigitalPhotoClues {
+    /// Exact sizes digital cameras save at (4:3, the shape of compact-camera sensors). Film prints are
+    /// 3:2 or square, and scanners save at sizes set by the print and the scan resolution.
+    static let cameraSizes: Set<Int> = [
+        640 * 10_000 + 480, 1024 * 10_000 + 768, 1280 * 10_000 + 960, 1600 * 10_000 + 1200,
+        2048 * 10_000 + 1536, 2272 * 10_000 + 1704, 2592 * 10_000 + 1944, 2816 * 10_000 + 2112,
+        3072 * 10_000 + 2304, 3264 * 10_000 + 2448, 3648 * 10_000 + 2736, 4000 * 10_000 + 3000,
+        4032 * 10_000 + 3024,
+    ]
+
+    static let cameraName = try! NSRegularExpression(
+        pattern: #"^(img|dsc|dscn|dscf|dsci|pict|cimg|dcp|hpim|kif|imag|pxl|p[0-9]{3})[_ -]?[0-9]{3,}\.(jpe?g|heic)$"#,
+        options: [.caseInsensitive])
+
+    /// A photo straight from a digital camera rather than a scanned print.
+    public static func looksDigital(_ info: FormatInfo) -> Bool {
+        let long = max(info.pixelWidth, info.pixelHeight), short = min(info.pixelWidth, info.pixelHeight)
+        if cameraSizes.contains(long * 10_000 + short) { return true }
+        if let name = info.originalFilename {
+            let range = NSRange(name.startIndex..., in: name)
+            if cameraName.firstMatch(in: name, range: range) != nil { return true }
+        }
+        return false
+    }
+
+    /// Clues about film prints that make no sense for a digital photo.
+    static let filmOnly: Set<EvidenceSource> = [.colorTone, .printFormat]
+
+    /// Leaves out film-print clues on digital photos (unless a print border was seen, which means
+    /// it's a scan after all).
+    public static func apply(to evidence: [DateEvidence], format: FormatInfo) -> [DateEvidence] {
+        guard looksDigital(format), !evidence.contains(where: { $0.source == .borderPaper }) else { return evidence }
+        // A "digital era" clue was tried too; on real data it made guesses worse, so there isn't one.
+        return evidence.map { e -> DateEvidence in
+            guard filmOnly.contains(e.source), !e.isHardConstraint, e.weight > 0 || e.seasonWeight > 0 else { return e }
+            var e = e
+            e.weight = 0
+            e.summary += " — left out: this looks like a digital camera photo, not a scanned print"
+            return e
+        }
+    }
+}
+
 // MARK: - Cameras the user remembers
 
 /// "I used this camera from … to …", entered by the user.

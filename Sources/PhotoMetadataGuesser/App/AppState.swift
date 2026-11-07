@@ -43,6 +43,10 @@ final class AppState {
     }
     /// Clues from matching undated photos to dated ones (see `EventLinks.referenceEvidence`).
     var referenceClues: [String: DateEvidence] = [:]
+    /// "Looks most like your dated photos from …" (see `YearProbe`).
+    var lookalikeClues: [String: DateEvidence] = [:]
+    /// Checked on the user's own dated photos: 0.3–0.7 did about equally well.
+    nonisolated static let lookalikeWeight = 0.4
     /// Likely events among undated photos (see `EventClusters`), not yet saved or dismissed.
     var eventSuggestions: [[String]] = []
     /// The date each suggested event would get if saved now (keyed by `eventKey`).
@@ -60,7 +64,7 @@ final class AppState {
     var isImportingPeople = false
     var analyses: [String: PhotoAnalysis]
     var decisions: [String: ReviewDecision] { didSet { scheduleDecisionSave() } }
-    var journal: [ApplyBatch] { didSet { store.save(journal, to: "journal") } }
+    var journal: [ApplyBatch] { didSet { store.save(journal, to: "journal"); scheduleRecompute() } }
 
     // MARK: Session state
 
@@ -302,13 +306,16 @@ final class AppState {
             guard let c = referenceCandidates[id], let p = featurePrints[id] else { continue }
             refPacked[id] = (p, c.year, c.month, Set(c.clusterIDs), false)
         }
-        let calendar = Calendar.current
-        for batch in journal where !batch.undone {
-            for e in batch.entries {
-                guard let p = featurePrints[e.assetID] else { continue }
-                let c = calendar.dateComponents([.year, .month], from: e.newDate)
-                refPacked[e.assetID] = (p, c.year ?? 0, c.month, [], true)
-            }
+        let confirmed = confirmedDates()
+        for c in confirmed {
+            guard let p = featurePrints[c.id] else { continue }
+            refPacked[c.id] = (p, c.year, c.month, [], true)
+        }
+        // Every dated photo with a fingerprint teaches the look of its year.
+        var probePacked: [(String, Int, Data)] = confirmed.compactMap { c in featurePrints[c.id].map { (c.id, c.year, $0) } }
+        let confirmedIDs = Set(confirmed.map(\.id))
+        for (id, c) in referenceCandidates where scan.undated[id] == nil && !confirmedIDs.contains(id) {
+            if let p = featurePrints[id] { probePacked.append((id, c.year, p)) }
         }
         let limits = photoLimits
         limitsUsedForEvents = limits
@@ -320,11 +327,14 @@ final class AppState {
                 EventLinks.Reference(print: EventLinks.unpack(r.0), year: r.1, month: r.2, people: r.3, datedHere: r.4)
             }
             let clues = EventLinks.referenceEvidence(undated: prints, people: who, references: references)
+            let probe = YearProbe(probePacked.map { .init(id: $0.0, year: $0.1, print: EventLinks.unpack($0.2)) })
+            let lookalikes = probe.evidence(for: prints, maxWeight: AppState.lookalikeWeight)
             let events = EventClusters.find(order: order, prints: prints, people: who, limits: limits)
             guard !Task.isCancelled else { return }
             await MainActor.run {
                 self.eventLinks = links
                 self.referenceClues = clues
+                self.lookalikeClues = lookalikes
                 self.allEventClusters = events
                 self.store.save(events, to: "eventClusters")
                 self.isFindingEvents = false
@@ -406,15 +416,19 @@ final class AppState {
         let photoPeople = self.allPhotoPeople()
         let links = self.eventLinks
         let referenceClues = self.referenceClues
+        let lookalikeClues = self.lookalikeClues
         let exact = settings.allowExactMonth
         let earliest = settings.earliestYear
         let cameras = cameraPeriods
         let events = eventSuggestions
+        let confirmed = confirmedDates()
+        let formats = appliedFormats(confirmed.map(\.id), undated: undated)
         Task.detached(priority: .userInitiated) {
             let result = AppState.computeEstimates(undated: undated, analyses: analyses, groups: groups,
                                                    people: people, photoPeople: photoPeople, links: links,
-                                                   referenceClues: referenceClues,
+                                                   referenceClues: referenceClues, lookalikeClues: lookalikeClues,
                                                    earliestYear: earliest, cameras: cameras, events: events,
+                                                   confirmed: confirmed, formats: formats,
                                                    allowExactMonth: exact)
             await MainActor.run {
                 guard generation == self.recomputeGeneration else { return }
@@ -425,6 +439,39 @@ final class AppState {
                 if result.limits != self.limitsUsedForEvents { self.recomputeLinks() }
             }
         }
+    }
+
+    struct ConfirmedDate: Sendable {
+        var id: String
+        var year: Int
+        var month: Int
+    }
+
+    /// The date each photo dated here has now (the latest change that wasn't undone).
+    func confirmedDates() -> [ConfirmedDate] {
+        var seen = Set<String>()
+        var out: [ConfirmedDate] = []
+        let calendar = Calendar.current
+        for batch in journal {   // newest first
+            for entry in batch.liveEntries where seen.insert(entry.assetID).inserted {
+                let c = calendar.dateComponents([.year, .month], from: entry.newDate)
+                if let year = c.year, let month = c.month { out.append(ConfirmedDate(id: entry.assetID, year: year, month: month)) }
+            }
+        }
+        return out
+    }
+
+    /// Sizes of dated photos that have left the scan, for telling digital photos from scans.
+    @ObservationIgnored private var formatCache: [String: FormatInfo] = [:]
+
+    private func appliedFormats(_ ids: [String], undated: [String: UndatedPhoto]) -> [String: FormatInfo] {
+        let missing = ids.filter { undated[$0] == nil && formatCache[$0] == nil }
+        if !missing.isEmpty && isAuthorized {
+            for (id, asset) in PhotoLibraryService.shared.assets(for: missing) {
+                formatCache[id] = FormatInfo(pixelWidth: asset.pixelWidth, pixelHeight: asset.pixelHeight)
+            }
+        }
+        return formatCache
     }
 
     struct EstimateResults {
@@ -440,17 +487,29 @@ final class AppState {
                                              photoPeople: [String: [GroupPersonHint]] = [:],
                                              links: [String: [EventLinks.Link]] = [:],
                                              referenceClues: [String: DateEvidence] = [:],
+                                             lookalikeClues: [String: DateEvidence] = [:],
                                              earliestYear: Int? = nil,
                                              cameras: [CameraPeriod] = [],
                                              events: [[String]] = [],
+                                             confirmed: [ConfirmedDate] = [],
+                                             formats: [String: FormatInfo] = [:],
                                              allowExactMonth: Bool) -> EstimateResults {
         let options = EvidenceFusion.Options(allowExactMonth: allowExactMonth)
+        // A photo's own clues, minus film-print clues when it's plainly a digital photo.
+        func photoClues(_ id: String, _ a: PhotoAnalysis) -> [DateEvidence] {
+            guard let format = undated[id]?.format ?? formats[id] else { return a.evidence }
+            return DigitalPhotoClues.apply(to: a.evidence, format: format)
+        }
+        // How the built-in clues have done on photos the user already dated.
+        let calibration = ClueCalibration.build(confirmed.compactMap { c in
+            analyses[c.id].map { ClueCalibration.Confirmed(evidence: photoClues(c.id, $0), year: c.year, month: c.month) }
+        })
         var result: [String: ComputedEstimate] = [:]
         var grouped = Set<String>()
 
         // Everything known about one photo on its own: its clues, who's in it, and when it was scanned.
         func evidence(_ id: String, _ a: PhotoAnalysis) -> [DateEvidence] {
-            var out = a.evidence
+            var out = photoClues(id, a).map(calibration.adjusted)
             out += GroupClues.peopleEvidence(photoPeople[id] ?? [], people: people)
             if let photo = undated[id],
                let limit = ProvenanceClues.libraryDateLimit(reason: photo.reason, libraryDate: photo.libraryDate) {
@@ -459,6 +518,7 @@ final class AppState {
             if let earliestYear { out.append(ProvenanceClues.earliestYear(earliestYear)) }
             if let photo = undated[id], let e = CameraClues.evidence(for: photo.format, periods: cameras) { out.append(e) }
             if let e = referenceClues[id] { out.append(e) }
+            if let e = lookalikeClues[id] { out.append(e) }
             return out
         }
 

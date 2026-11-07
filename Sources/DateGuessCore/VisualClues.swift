@@ -254,7 +254,8 @@ public enum SceneClues {
         "christmas_decoration": Cue(season: .winter, strength: 0.9, month: 12, description: "Christmas decorations"),
         "wreath": Cue(season: .winter, strength: 0.5, month: 12, description: "a wreath"),
         // Snow and winter sports.
-        "snow": Cue(season: .winter, strength: 0.8, month: nil, description: "snow"),
+        // Vision often sees "snow" in white walls, sky, sand and overexposed prints, so it's a weak sign alone.
+        "snow": Cue(season: .winter, strength: 0.45, month: nil, description: "snow"),
         "snowman": Cue(season: .winter, strength: 0.9, month: nil, description: "a snowman"),
         "snowball": Cue(season: .winter, strength: 0.8, month: nil, description: "snowballs"),
         "sled": Cue(season: .winter, strength: 0.8, month: nil, description: "a sled"),
