@@ -549,6 +549,13 @@ struct PhotoGrid: View {
                     }
             }
         }
+        // R turns the selected photos.
+        .onRotateKey {
+            let chosen = ids.filter(selected.contains)
+            guard !chosen.isEmpty else { return false }
+            state.rotate(chosen)
+            return true
+        }
     }
 }
 

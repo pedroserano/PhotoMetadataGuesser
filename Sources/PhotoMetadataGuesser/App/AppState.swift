@@ -623,6 +623,22 @@ final class AppState {
         decisions[id] = d
     }
 
+    /// The same date for many photos at once. A nil season keeps each photo's own guessed season;
+    /// a month sets that exact month. The photos stay checked, ready to apply.
+    func setDate(_ ids: [String], year: Int, season: Season?, month: Int?) {
+        var copy = decisions
+        for id in ids {
+            var d = copy[id] ?? ReviewDecision()
+            guard !d.ignored else { continue }
+            d.overrideYear = year
+            d.overrideSeason = month == nil ? season : nil
+            d.overrideMonth = month
+            d.selected = true
+            copy[id] = d
+        }
+        decisions = copy
+    }
+
     func select(_ ids: [String], _ selected: Bool) {
         var copy = decisions
         for id in ids {
@@ -834,6 +850,43 @@ final class AppState {
         banner = "\(verb) \(batch.entries.count.formatted()) photos in your Photos library."
             + (skipped == 0 ? "" : " Skipped \(skipped) whose date was changed in Photos since the last scan.")
             + (failed == 0 ? "" : " \(failed) couldn't be changed.")
+    }
+
+    // MARK: Rotation
+
+    var isRotating = false
+
+    /// Turns photos 90° clockwise in Photos, as an edit (Image ▸ Revert to Original brings the
+    /// original back). Dates, places, people and albums stay as they are.
+    func rotate(_ ids: [String]) {
+        guard !ids.isEmpty, !isRotating, isAuthorized else { return }
+        isRotating = true
+        banner = ids.count == 1 ? "Rotating…" : "Rotating \(ids.count.formatted()) photos…"
+        Task {
+            var done = 0
+            var lastError: String?
+            for id in ids {
+                PhotoLibraryService.shared.forget(id)
+                guard let asset = PhotoLibraryService.shared.asset(for: id) else { lastError = "It’s no longer in Photos."; continue }
+                do {
+                    try await PhotoRotator.rotate(asset, by: .clockwise90)
+                    PhotoLibraryService.shared.forget(id)
+                    ImageRevisions.shared.bump(id)
+                    done += 1
+                } catch {
+                    lastError = error.localizedDescription
+                }
+            }
+            isRotating = false
+            let failed = ids.count - done
+            if failed == 0 {
+                banner = done == 1 ? "Rotated in Photos. Press R again to keep turning, or use Image ▸ Revert to Original in Photos."
+                    : "Rotated \(done.formatted()) photos in Photos."
+            } else {
+                banner = (done > 0 ? "Rotated \(done.formatted()), but " : "")
+                    + "\(failed.formatted()) couldn’t be rotated" + (lastError.map { ": \($0)" } ?? ".")
+            }
+        }
     }
 
     // MARK: People

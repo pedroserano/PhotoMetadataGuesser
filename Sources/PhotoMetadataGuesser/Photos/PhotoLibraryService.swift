@@ -63,6 +63,9 @@ final class PhotoLibraryService: @unchecked Sendable {
         return PHAsset.fetchAssets(with: .image, options: options)
     }
 
+    /// Drops a cached asset after it was edited here, so the next fetch sees the edit.
+    func forget(_ id: String) { assetCache.removeObject(forKey: id as NSString) }
+
     func asset(for id: String) -> PHAsset? {
         if let cached = assetCache.object(forKey: id as NSString) { return cached }
         guard let asset = PHAsset.fetchAssets(withLocalIdentifiers: [id], options: nil).firstObject else { return nil }

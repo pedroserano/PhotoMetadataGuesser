@@ -19,6 +19,16 @@ struct ReviewView: View {
     private var lastClicked: String? { get { _lastClicked.wrappedValue } nonmutating set { _lastClicked.wrappedValue = newValue } }
     var _confirmApply = State<Bool>(initialValue: false)
     private var confirmApply: Bool { get { _confirmApply.wrappedValue } nonmutating set { _confirmApply.wrappedValue = newValue } }
+    /// Highlighted photos (click, ⌘-click, Shift-click), for rotating. Separate from the checkmarks,
+    /// which pick the photos to date.
+    var _selection = State<Set<String>>(initialValue: [])
+    private var selection: Set<String> { get { _selection.wrappedValue } nonmutating set { _selection.wrappedValue = newValue } }
+    var _selectionAnchor = State<String?>(initialValue: nil)
+    private var selectionAnchor: String? { get { _selectionAnchor.wrappedValue } nonmutating set { _selectionAnchor.wrappedValue = newValue } }
+    var _rotateRequest = State<[String]?>(initialValue: nil)
+    private var rotateRequest: [String]? { get { _rotateRequest.wrappedValue } nonmutating set { _rotateRequest.wrappedValue = newValue } }
+    /// More than this many checked photos asks first before R rotates them all.
+    static let rotateWithoutAsking = 10
 
     enum Filter: String, CaseIterable, Identifiable {
         case toReview = "All"
@@ -95,8 +105,10 @@ struct ReviewView: View {
             }
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 200, maximum: 260), spacing: 16, alignment: .top)], spacing: 20) {
                 ForEach(ids, id: \.self) { id in
-                    ReviewCard(assetID: id, onOpen: { detailID = id },
-                               onToggle: { toggle(id, in: ids, extendRange: NSEvent.modifierFlags.contains(.shift)) })
+                    ReviewCard(assetID: id, isSelected: selection.contains(id), onOpen: { detailID = id },
+                               onSelect: { select(id, in: ids, modifiers: NSEvent.modifierFlags) },
+                               onToggle: { toggle(id, in: ids, extendRange: NSEvent.modifierFlags.contains(.shift)) },
+                               onRotate: { rotate(selection.contains(id) ? ids.filter(selection.contains) : [id]) })
                 }
             }
             .padding(20)
@@ -109,6 +121,8 @@ struct ReviewView: View {
                     .keyboardShortcut("a", modifiers: .command)
                 Button("Uncheck All Shown") { state.select(ids, false) }
                     .keyboardShortcut("a", modifiers: [.command, .shift])
+                Button("Deselect") { selection = [] }
+                    .keyboardShortcut(.escape, modifiers: [])
             }
             .opacity(0)
             .frame(width: 0, height: 0)
@@ -119,6 +133,27 @@ struct ReviewView: View {
         .toolbar { toolbarItems(ids, selectedCount) }
         .sheet(item: Binding(get: { detailID.map(IdentifiedString.init) }, set: { detailID = $0?.id })) { item in
             PhotoDetailSheet(assetID: item.id)
+        }
+        // R turns the highlighted photos shown here.
+        .onRotateKey {
+            let chosen = ids.filter(selection.contains)
+            guard !chosen.isEmpty else { return false }
+            rotate(chosen)
+            return true
+        }
+        // Space checks the highlighted photos for dating (or unchecks them if they're all checked).
+        .onSpaceKey {
+            let chosen = ids.filter { selection.contains($0) && !state.decision($0).ignored }
+            guard !chosen.isEmpty else { return false }
+            state.select(chosen, !chosen.allSatisfy { state.decision($0).selected })
+            return true
+        }
+        .alert("Rotate \((rotateRequest?.count ?? 0).formatted()) selected photos?",
+               isPresented: Binding(get: { rotateRequest != nil }, set: { if !$0 { rotateRequest = nil } })) {
+            Button("Rotate") { if let ids = rotateRequest { state.rotate(ids) }; rotateRequest = nil }
+            Button("Cancel", role: .cancel) { rotateRequest = nil }
+        } message: {
+            Text("Each turns 90° clockwise in Photos. It’s an edit, so the original is kept and Image ▸ Revert to Original in Photos brings it back.")
         }
         .alert("Apply \(selectedCount.formatted()) new dates?", isPresented: _confirmApply.projectedValue) {
             Button("Apply Dates") { state.applySelected() }
@@ -167,6 +202,7 @@ struct ReviewView: View {
         ToolbarItemGroup(placement: .primaryAction) {
             sortMenu
             checkMenu(ids)
+            SetDateButton(state: state, ids: ids.filter { state.decision($0).selected })
             Button {
                 confirmApply = true
             } label: {
@@ -178,7 +214,26 @@ struct ReviewView: View {
         }
     }
 
-    /// Click checks or unchecks one photo; Shift-click sets every photo from the last one clicked to this
+    /// Click highlights one photo; ⌘-click adds or removes one; Shift-click highlights a range.
+    private func select(_ id: String, in ids: [String], modifiers: NSEvent.ModifierFlags) {
+        if modifiers.contains(.shift), let anchor = selectionAnchor,
+           let a = ids.firstIndex(of: anchor), let b = ids.firstIndex(of: id) {
+            selection.formUnion(ids[min(a, b)...max(a, b)])
+            return
+        }
+        if modifiers.contains(.command) {
+            if selection.contains(id) { selection.remove(id) } else { selection.insert(id) }
+        } else {
+            selection = [id]
+        }
+        selectionAnchor = id
+    }
+
+    private func rotate(_ ids: [String]) {
+        if ids.count > Self.rotateWithoutAsking { rotateRequest = ids } else { state.rotate(ids) }
+    }
+
+    /// Clicking a checkmark checks or unchecks one photo; Shift-click sets every photo from the last one clicked to this
     /// one the same way (like selecting a range of files in Finder).
     private func toggle(_ id: String, in ids: [String], extendRange: Bool) {
         let newValue = !state.decision(id).selected
@@ -218,6 +273,9 @@ struct ReviewView: View {
             Button("Check Medium or High Confidence") {
                 state.select(ids.filter { state.effectiveEstimate($0)?.confidenceLevel != .low }, true)
             }
+            let highlighted = ids.filter(selection.contains)
+            Button("Check Selected (\(highlighted.count.formatted()))  Space") { state.select(highlighted, true) }
+                .disabled(highlighted.isEmpty)
             Divider()
             Button("Uncheck All Shown  ⇧⌘A") { state.select(ids, false) }
         } label: {
@@ -234,9 +292,14 @@ struct IdentifiedString: Identifiable {
 struct ReviewCard: View {
     @Environment(AppState.self) private var state
     var assetID: String
+    /// Highlighted for rotating (not the same as checked for dating).
+    var isSelected = false
     var onOpen: () -> Void
-    /// Clicking the picture (or its checkmark) checks or unchecks it.
+    /// Clicking the picture highlights it.
+    var onSelect: () -> Void = {}
+    /// Clicking the checkmark checks or unchecks it.
     var onToggle: () -> Void = {}
+    var onRotate: () -> Void = {}
     var _showWhy = State<Bool>(initialValue: false)
     private var showWhy: Bool { get { _showWhy.wrappedValue } nonmutating set { _showWhy.wrappedValue = newValue } }
 
@@ -246,21 +309,26 @@ struct ReviewCard: View {
             let overridden = decision.isOverridden
             VStack(alignment: .leading, spacing: 6) {
                 AssetThumbnail(assetID: assetID, side: .infinity, height: 170)
-                    // A single click checks it: no double-click to wait for, so checking many is quick.
-                    .onTapGesture { if !decision.ignored { onToggle() } }
+                    .onTapGesture { onSelect() }
                     .overlay {
                         RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .strokeBorder(decision.selected ? Theme.accent : .clear, lineWidth: 3)
+                            .strokeBorder(isSelected ? Theme.accent : .clear, lineWidth: 3)
                             .allowsHitTesting(false)
                     }
                     .overlay(alignment: .bottomTrailing) {
-                        Image(systemName: decision.selected ? "checkmark.circle.fill" : "circle")
-                            .font(.system(size: 20, weight: .semibold))
-                            .foregroundStyle(decision.selected ? Theme.accent : .white, decision.selected ? .white : .clear)
-                            .shadow(color: .black.opacity(0.4), radius: 2)
-                            .padding(7)
-                            .opacity(decision.ignored ? 0.3 : 1)
-                            .allowsHitTesting(false)
+                        Button(action: onToggle) {
+                            Image(systemName: decision.selected ? "checkmark.circle.fill" : "circle")
+                                .font(.system(size: 22, weight: .semibold))
+                                .foregroundStyle(decision.selected ? Theme.accent : .white, decision.selected ? .white : .black.opacity(0.25))
+                                .shadow(color: .black.opacity(0.4), radius: 2)
+                                .padding(5)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(decision.ignored)
+                        .opacity(decision.ignored ? 0.3 : 1)
+                        .help(decision.selected ? "Checked: this date will be applied. Click to uncheck."
+                              : "Check to apply this date. Shift-click checks a range; Space checks the selected photos.")
                     }
                     .overlay(alignment: .topTrailing) {
                         Button(action: onOpen) {
@@ -360,6 +428,8 @@ struct ReviewCard: View {
                     .disabled(decision.ignored)
                 Button("Details & Who’s in It…") { onOpen() }
                 Button("Show in Photos") { Task { await state.showInPhotos(assetID) } }
+                Button(isSelected ? "Rotate Selected Clockwise  R" : "Rotate Clockwise") { onRotate() }
+                    .disabled(state.isRotating)
                 Divider()
                 if decision.ignored {
                     Button("Review This Photo Again") { state.setIgnored(assetID, false) }
@@ -399,6 +469,7 @@ struct PhotoDetailSheet: View {
     var body: some View {
         HStack(alignment: .top, spacing: 20) {
             FacePreview(assetID: assetID, maxSide: 520)
+                .onRotateKey { state.rotate([assetID]); return true }
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
                     if let estimate = state.effectiveEstimate(assetID), let computed = state.estimates[assetID] {
@@ -564,6 +635,79 @@ struct SameEventStrip: View {
         }
         .sheet(item: _editing.projectedValue) { draft in
             EventEditor(seed: draft.ids)
+        }
+    }
+}
+
+/// One date for every checked photo, instead of setting each photo's own controls.
+struct SetDateButton: View {
+    var state: AppState
+    /// The checked photos shown.
+    var ids: [String]
+    @State private var showing = false
+    @State private var year = YearBounds.currentYear() - 30
+    /// Nil keeps each photo's own guessed season.
+    @State private var season: Season?
+    @State private var month: Int?
+
+    var body: some View {
+        Button {
+            // Start from the year most of them are guessed at.
+            let years = ids.compactMap { state.effectiveEstimate($0)?.year }
+            if let common = Dictionary(grouping: years, by: { $0 }).max(by: { $0.value.count < $1.value.count })?.key {
+                year = common
+            }
+            season = nil
+            month = nil
+            showing = true
+        } label: {
+            Label("Set Date", systemImage: "calendar.badge.clock")
+        }
+        .keyboardShortcut("d", modifiers: .command)
+        .disabled(ids.isEmpty)
+        .help(ids.isEmpty ? "Check photos first, then give them all one date (⌘D)"
+              : "Give the \(ids.count.formatted()) checked photos one date (⌘D)")
+        .popover(isPresented: $showing, arrowEdge: .bottom) {
+            Form {
+                LabeledContent("Year") {
+                    YearComboBox(year: year, range: state.lowestYear...YearBounds.currentYear()) { year = $0 }
+                        .frame(width: 90)
+                }
+                Picker("Month", selection: Binding(
+                    get: { month.map { "m\($0)" } ?? season.map { "s\($0.rawValue)" } ?? "keep" },
+                    set: { tag in
+                        if tag.hasPrefix("m") { month = Int(tag.dropFirst()); season = nil }
+                        else if tag.hasPrefix("s") { season = Season(rawValue: String(tag.dropFirst())); month = nil }
+                        else { season = nil; month = nil }
+                    })) {
+                    Text("Keep Each Photo’s Season").tag("keep")
+                    Section("Season") {
+                        ForEach(Season.allCases) { s in Text(s.displayName).tag("s\(s.rawValue)") }
+                    }
+                    Section("Month") {
+                        ForEach(1...12, id: \.self) { m in Text(DateEstimate.monthNames[m - 1]).tag("m\(m)") }
+                    }
+                }
+                Text("Nothing changes in Photos until you click Apply.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .formStyle(.grouped)
+            .frame(width: 340)
+            .safeAreaInset(edge: .bottom) {
+                HStack {
+                    Spacer()
+                    Button("Cancel") { showing = false }
+                        .keyboardShortcut(.cancelAction)
+                    Button(ids.count == 1 ? "Set Date" : "Set Date for \(ids.count.formatted()) Photos") {
+                        state.setDate(ids, year: year, season: season, month: month)
+                        showing = false
+                    }
+                    .keyboardShortcut(.defaultAction)
+                    .buttonStyle(.borderedProminent)
+                }
+                .padding([.horizontal, .bottom], 16)
+            }
         }
     }
 }

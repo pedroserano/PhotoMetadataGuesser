@@ -51,6 +51,7 @@ struct FacePreview: View {
             .foregroundStyle(.secondary)
         }
         .onAppear { loader.load(assetID, side: maxSide) }
+        .onChange(of: ImageRevisions.shared.revision(assetID)) { loader.load(assetID, side: maxSide, force: true) }
         .onDisappear { loader.cancel() }
     }
 

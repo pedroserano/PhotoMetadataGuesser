@@ -19,7 +19,14 @@ struct PhotoMetadataGuesserApp: App {
                 }
         }
         .windowToolbarStyle(.unified)
-        .commands { SidebarCommands() }
+        .commands {
+            SidebarCommands()
+            CommandGroup(replacing: .help) {
+                Button("Keyboard Shortcuts  /") {
+                    NotificationCenter.default.post(name: .showKeyboardShortcuts, object: nil)
+                }
+            }
+        }
 
         Settings {
             SettingsView()

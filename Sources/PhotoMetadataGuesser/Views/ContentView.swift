@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import DateGuessCore
 
@@ -36,6 +37,7 @@ struct ContentView: View {
     private var selection: SidebarItem? { get { _selection.wrappedValue } nonmutating set { _selection.wrappedValue = newValue } }
     var _columnVisibility = State<NavigationSplitViewVisibility>(initialValue: .all)
     private var columnVisibility: NavigationSplitViewVisibility { get { _columnVisibility.wrappedValue } nonmutating set { _columnVisibility.wrappedValue = newValue } }
+    @State private var showShortcuts = false
 
     var body: some View {
         Group {
@@ -66,6 +68,16 @@ struct ContentView: View {
             }
         }
         .overlay(alignment: .bottom) { BannerView() }
+        .sheet(isPresented: $showShortcuts) { ShortcutsView() }
+        // / shows the shortcuts, unless another sheet or dialog is in front.
+        .onHelpKey {
+            guard NSApp.keyWindow?.sheetParent == nil, NSApp.keyWindow?.attachedSheet == nil else { return false }
+            showShortcuts = true
+            return true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .showKeyboardShortcuts)) { _ in
+            if NSApp.keyWindow?.attachedSheet == nil { showShortcuts = true }
+        }
     }
 
     private var sidebar: some View {

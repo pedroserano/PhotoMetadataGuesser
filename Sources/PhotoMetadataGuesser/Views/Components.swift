@@ -60,11 +60,11 @@ final class ThumbnailLoader {
     @ObservationIgnored private var requestID: PHImageRequestID?
     @ObservationIgnored private var loadedID: String?
 
-    func load(_ assetID: String, side: CGFloat) {
-        guard loadedID != assetID else { return }
+    func load(_ assetID: String, side: CGFloat, force: Bool = false) {
+        guard force || loadedID != assetID else { return }
         cancel()
         loadedID = assetID
-        image = nil
+        if !force { image = nil }   // a reload keeps the old image until the new one arrives
         guard let asset = PhotoLibraryService.shared.asset(for: assetID) else { return }
         requestID = PhotoLibraryService.shared.requestThumbnail(for: asset, side: side) { [weak self] img in
             guard let img else { return }
@@ -117,6 +117,7 @@ struct AssetThumbnail: View {
             .onAppear { loader.load(assetID, side: requestSide) }
             .onDisappear { loader.cancel() }
             .onChange(of: assetID) { _, new in loader.load(new, side: requestSide) }
+            .onChange(of: ImageRevisions.shared.revision(assetID)) { loader.load(assetID, side: requestSide, force: true) }
     }
 }
 
@@ -142,6 +143,7 @@ struct AssetPreview: View {
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .onAppear { loader.load(assetID, side: maxSide) }
         .onDisappear { loader.cancel() }
+        .onChange(of: ImageRevisions.shared.revision(assetID)) { loader.load(assetID, side: maxSide, force: true) }
     }
 }
 
