@@ -91,36 +91,45 @@ struct GeneralSettingsView: View {
     }
 }
 
-/// The optional face-age model: how old named people look, combined with their birth years.
+/// The face-age model: how old named people look, combined with their birth years.
 struct FaceAgeModelSection: View {
     @Environment(AppState.self) private var state
-    @State private var installed = FaceAgeEstimator.isInstalled
+    @State private var own = FaceAgeEstimator.hasOwnModel
     @State private var problem: String?
 
     var body: some View {
+        let builtIn = FaceAgeEstimator.bundledURL != nil
         Section("Face Age Model") {
             HStack {
-                Label(installed ? "Installed" : "Not installed", systemImage: installed ? "checkmark.circle.fill" : "circle.dashed")
-                    .foregroundStyle(installed ? .green : .secondary)
+                Label(own ? "Your own model" : builtIn ? "Built in: MiVOLO v2" : "Not installed",
+                      systemImage: own || builtIn ? "checkmark.circle.fill" : "circle.dashed")
+                    .foregroundStyle(own || builtIn ? .green : .secondary)
                 Spacer()
-                Button(installed ? "Replace…" : "Choose Model…") { choose() }
-                if installed {
-                    Button("Remove", role: .destructive) {
+                Button(own ? "Replace…" : "Use Another Model…") { choose() }
+                if own {
+                    Button(builtIn ? "Use Built-in" : "Remove", role: builtIn ? nil : .destructive) {
                         FaceAgeEstimator.remove()
-                        installed = false
-                        state.recomputeEstimates()
+                        own = false
+                        state.faceAges = [:]   // read again with the model now in use
+                        state.startFaceAges()
                     }
                 }
             }
-            if installed {
+            if own || builtIn {
                 let readings = state.faceAges.values.reduce(0) { $0 + $1.values.filter { $0 >= 0 }.count }
                 Text("Read \(readings.formatted()) faces of people with a birth year so far.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             if let problem { Text(problem).font(.caption).foregroundStyle(.red) }
-            Text("A Core ML model (.mlpackage or .mlmodel) that takes a 384×384 “face” image and gives an “age” estimates how old each named person looks. With their birth year that dates the photo, and several people in one photo are combined. It runs on this Mac only. Age models are usually licensed for non-commercial use only, so none comes with the app.")
+            Text("Estimates how old each named person looks. With their birth year that dates the photo, and several people in one photo are combined. It runs on this Mac only, and only for people with a birth year.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            if builtIn && !own {
+                Text("MiVOLO v2 by Maksim Kuprashevich, Irina Tolstykh et al. (huggingface.co/iitolstykh/mivolo_v2), converted to Core ML. Licensed CC BY-NC 4.0: free for non-commercial use, with this credit.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
         }
     }
 
@@ -128,16 +137,17 @@ struct FaceAgeModelSection: View {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.init(filenameExtension: "mlmodel")!, .init(filenameExtension: "mlpackage")!]
         panel.treatsFilePackagesAsDirectories = false
-        panel.message = "Choose a face-age Core ML model"
+        panel.message = "Choose a Core ML model that takes a 384×384 “face” image and gives an “age”"
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
             try FaceAgeEstimator.install(from: url)
-            installed = true
+            own = true
             problem = nil
+            state.faceAges = [:]
             state.startFaceAges()
         } catch {
             problem = error.localizedDescription
-            installed = FaceAgeEstimator.isInstalled
+            own = FaceAgeEstimator.hasOwnModel
         }
     }
 }

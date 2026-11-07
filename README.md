@@ -127,10 +127,16 @@ Resources/                    Info.plist, entitlements, app icon
 
 ## Privacy
 
-- Everything runs on your Mac. Nothing is sent anywhere, and the app has no internet access.
+- Everything runs on your Mac. The only thing sent anywhere is Places: place names, and what you type in its search box, go to Apple Maps.
 - The Photos library file is only read (names and faces), never changed. Names are only ever added in Photos itself.
 - Contacts are only read, unless you turn on saving birthdays to Contacts in Settings.
 - App data (scan results, groups, people, estimates, undo history) lives in the app’s container under Application Support.
+
+## Face age model
+
+The app includes a face-age model based on [MiVOLO v2](https://huggingface.co/iitolstykh/mivolo_v2) by Maksim Kuprashevich, Irina Tolstykh et al. ([code](https://github.com/WildChlamydia/MiVOLO), papers [2307.04616](https://arxiv.org/abs/2307.04616) and [2403.02302](https://arxiv.org/abs/2403.02302)), converted to Core ML. It's licensed [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/): free for non-commercial use, with credit. It isn't covered by this project's own license. What was changed is listed in `Resources/FaceAge-NOTICE.txt`.
+
+It reads how old each named person with a birth year looks; the app corrects those readings with faces in your dated photos and combines everyone in a photo into one year clue. Settings ▸ General ▸ Face Age Model can switch to another Core ML model (a 384×384 `face` image in, `age` out).
 
 ## Limitations
 

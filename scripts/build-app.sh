@@ -37,6 +37,11 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN_DIR/PhotoMetadataGuesser" "$APP/Contents/MacOS/PhotoMetadataGuesser"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
+# The face-age model (CC BY-NC 4.0, see Resources/FaceAge-NOTICE.txt). The app works without it.
+if [ -d Resources/FaceAge.mlpackage ]; then
+  cp -R Resources/FaceAge.mlpackage "$APP/Contents/Resources/FaceAge.mlpackage"
+  cp Resources/FaceAge-NOTICE.txt "$APP/Contents/Resources/FaceAge-NOTICE.txt"
+fi
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
 echo "▸ Signing…"

@@ -21,18 +21,26 @@ final class FaceAgeEstimator: @unchecked Sendable {
         return urls.first { FileManager.default.fileExists(atPath: $0.path) } ?? urls[0]
     }
     static var compiledURL: URL { JSONStore.shared.directory.appendingPathComponent("FaceAge.mlmodelc") }
-    static var isInstalled: Bool { FileManager.default.fileExists(atPath: modelURL.path) }
+    /// One the user added in Settings (it replaces the built-in one).
+    static var hasOwnModel: Bool { fileNames.contains { FileManager.default.fileExists(atPath: JSONStore.shared.directory.appendingPathComponent($0).path) } }
+    /// The model that comes with the app (MiVOLO v2, CC BY-NC 4.0: see FaceAge-NOTICE.txt).
+    static var bundledURL: URL? { Bundle.main.url(forResource: "FaceAge", withExtension: "mlpackage") }
+    static var isInstalled: Bool { hasOwnModel || bundledURL != nil }
+    /// The model in use: the user's own, otherwise the built-in one.
+    static var sourceURL: URL? { hasOwnModel ? modelURL : bundledURL }
 
     /// Loads the installed model, compiling it once.
     static func load() throws -> FaceAgeEstimator? {
-        guard isInstalled else { return nil }
+        guard let sourceURL else { return nil }
         let fm = FileManager.default
-        let source = (try? fm.attributesOfItem(atPath: modelURL.path)[.modificationDate] as? Date) ?? .distantPast
-        let built = (try? fm.attributesOfItem(atPath: compiledURL.path)[.modificationDate] as? Date) ?? .distantPast
-        if built < source {
-            let temp = try MLModel.compileModel(at: modelURL)
+        // Recompile when the model changes, or when switching between the user's and the built-in one.
+        let marker = compiledURL.appendingPathComponent("source.txt")
+        let stamp = "\(sourceURL.path)|\(((try? fm.attributesOfItem(atPath: sourceURL.path)[.modificationDate] as? Date) ?? .distantPast).timeIntervalSince1970)"
+        if (try? String(contentsOf: marker, encoding: .utf8)) != stamp {
+            let temp = try MLModel.compileModel(at: sourceURL)
             try? fm.removeItem(at: compiledURL)
             try fm.moveItem(at: temp, to: compiledURL)
+            try? stamp.write(to: marker, atomically: true, encoding: .utf8)
         }
         let config = MLModelConfiguration()
         // Measured on this model: GPU 0.1 s a face, Neural Engine 0.15 s, CPU 0.5 s.
