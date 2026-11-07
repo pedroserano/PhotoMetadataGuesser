@@ -64,7 +64,9 @@ public struct ClueCalibration: Codable, Hashable, Sendable {
 
     /// Which clue this is, the same for every photo it fires on. Nil for clues that aren't checked.
     public static func key(_ e: DateEvidence) -> String? {
-        guard calibrated.contains(e.source), !e.isHardConstraint else { return nil }
+        guard !e.isHardConstraint else { return nil }
+        if let key = e.calibrationKey { return key }
+        guard calibrated.contains(e.source) else { return nil }
         // The look-alike clue has its own check (how well its closest photos agree).
         guard !e.summary.hasPrefix("Looks most like") else { return nil }
         // Notes added by `adjusted` don't change which clue it is.

@@ -8,7 +8,7 @@ import DateGuessCore
 @MainActor
 @Observable
 final class AppState {
-    private let store = JSONStore.shared
+    let store = JSONStore.shared
     private let library = PhotoLibraryService.shared
     /// The Places tab's guesses and choices.
     @ObservationIgnored let places = PlacesState()
@@ -35,6 +35,9 @@ final class AppState {
     var cameraPeriods: [CameraPeriod] { didSet { store.save(cameraPeriods, to: "cameraPeriods"); scheduleRecompute() } }
     /// Faces Photos detected in undated photos (asset ID → faces).
     var detectedFaces: [String: [DetectedFace]] { didSet { store.save(detectedFaces, to: "detectedFaces"); scheduleRecompute() } }
+    /// How old each named person looks, from the optional face-age model: photo → face group → years.
+    var faceAges: [String: [String: Double]] = [:] { didSet { scheduleFaceAgeSave(); scheduleRecompute() } }
+    @ObservationIgnored var faceAgeSaveTask: Task<Void, Never>?
     /// Image fingerprints of undated photos, used to find look-alikes from the same event.
     var featurePrints: [String: Data] = [:]
     /// Look-alike matches between undated photos (recomputed when fingerprints, faces or the scan change).
@@ -84,7 +87,7 @@ final class AppState {
     var banner: String?
 
     @ObservationIgnored private var scanTask: Task<Void, Never>?
-    @ObservationIgnored private var estimateTask: Task<Void, Never>?
+    @ObservationIgnored var estimateTask: Task<Void, Never>?
     @ObservationIgnored private var recomputeTask: Task<Void, Never>?
     @ObservationIgnored private var analysesSaveTask: Task<Void, Never>?
     @ObservationIgnored private var decisionsSaveTask: Task<Void, Never>?
@@ -97,6 +100,7 @@ final class AppState {
         photoPeople = store.load([String: [GroupPersonHint]].self, from: "photoPeople") ?? [:]
         taggedPeople = store.load([TaggedPerson].self, from: "taggedPeople") ?? []
         detectedFaces = store.load([String: [DetectedFace]].self, from: "detectedFaces") ?? [:]
+        faceAges = store.load([String: [String: Double]].self, from: "faceAges") ?? [:]
         cameraPeriods = store.load([CameraPeriod].self, from: "cameraPeriods") ?? []
         featurePrints = store.loadBinary([String: Data].self, from: "featurePrints") ?? [:]
         referenceCandidates = store.load([String: ReferenceCandidate].self, from: "referenceCandidates") ?? [:]
@@ -272,7 +276,7 @@ final class AppState {
         let have = Set(undatedMissing + referencesMissing)
         let placesMissing = places.fingerprintQueue(have: featurePrints).filter { !have.contains($0) }
         let missing = undatedMissing + referencesMissing + placesMissing
-        guard !missing.isEmpty else { recomputeLinks(); places.recompute(); return }
+        guard !missing.isEmpty else { recomputeLinks(); places.recompute(); startFaceAges(); return }
         isEstimating = true
         let phase = !undatedMissing.isEmpty ? "Comparing photos to find ones from the same event…"
             : !referencesMissing.isEmpty ? "Comparing with your dated photos…" : "Learning what your places look like…"
@@ -290,6 +294,7 @@ final class AppState {
             self.saveFeaturePrintsNow()
             self.recomputeLinks()
             self.places.recompute()
+            if !Task.isCancelled { self.startFaceAges() }
         }
     }
 
@@ -432,12 +437,15 @@ final class AppState {
         let events = eventSuggestions
         let confirmed = confirmedDates()
         let formats = appliedFormats(confirmed.map(\.id), undated: undated)
+        let faceReadings = self.faceReadings()
+        let faceCorrection = self.faceAgeCorrection()
         Task.detached(priority: .userInitiated) {
             let result = AppState.computeEstimates(undated: undated, analyses: analyses, groups: groups,
                                                    people: people, photoPeople: photoPeople, links: links,
                                                    referenceClues: referenceClues, lookalikeClues: lookalikeClues,
                                                    earliestYear: earliest, cameras: cameras, events: events,
                                                    confirmed: confirmed, formats: formats,
+                                                   faceReadings: faceReadings, faceCorrection: faceCorrection,
                                                    allowExactMonth: exact)
             await MainActor.run {
                 guard generation == self.recomputeGeneration else { return }
@@ -502,7 +510,19 @@ final class AppState {
                                              events: [[String]] = [],
                                              confirmed: [ConfirmedDate] = [],
                                              formats: [String: FormatInfo] = [:],
+                                             faceReadings: [String: [FaceAgeClues.Reading]] = [:],
+                                             faceCorrection: FaceAgeClues.Correction = .standard,
                                              allowExactMonth: Bool) -> EstimateResults {
+        // Who's in a photo: birth years, and how old they look (the face-age model when it has read
+        // them, otherwise Photos' rough age groups).
+        func peopleClues(_ id: String) -> [DateEvidence] {
+            var clues = GroupClues.peopleEvidence(photoPeople[id] ?? [], people: people)
+            if let readings = faceReadings[id], let e = FaceAgeClues.evidence(readings, people: people, correction: faceCorrection) {
+                clues.removeAll { $0.calibrationKey?.hasPrefix("person:faceAge:") == true }
+                clues.append(e)
+            }
+            return clues
+        }
         let options = EvidenceFusion.Options(allowExactMonth: allowExactMonth)
         // A photo's own clues, minus film-print clues when it's plainly a digital photo.
         func photoClues(_ id: String, _ a: PhotoAnalysis) -> [DateEvidence] {
@@ -511,7 +531,10 @@ final class AppState {
         }
         // How the built-in clues have done on photos the user already dated.
         let calibration = ClueCalibration.build(confirmed.compactMap { c in
-            analyses[c.id].map { ClueCalibration.Confirmed(evidence: photoClues(c.id, $0), year: c.year, month: c.month) }
+            analyses[c.id].map {
+                ClueCalibration.Confirmed(evidence: photoClues(c.id, $0) + peopleClues(c.id),
+                                          year: c.year, month: c.month)
+            }
         })
         var result: [String: ComputedEstimate] = [:]
         var grouped = Set<String>()
@@ -519,7 +542,7 @@ final class AppState {
         // Everything known about one photo on its own: its clues, who's in it, and when it was scanned.
         func evidence(_ id: String, _ a: PhotoAnalysis) -> [DateEvidence] {
             var out = photoClues(id, a).map(calibration.adjusted)
-            out += GroupClues.peopleEvidence(photoPeople[id] ?? [], people: people)
+            out += peopleClues(id).map(calibration.adjusted)
             if let photo = undated[id],
                let limit = ProvenanceClues.libraryDateLimit(reason: photo.reason, libraryDate: photo.libraryDate) {
                 out.append(limit)
@@ -1048,7 +1071,9 @@ final class AppState {
         var assets = Set(photoPeople.keys).union(detectedFaces.keys)
         for ids in tagged.values { assets.formUnion(ids) }
         var out: [String: [GroupPersonHint]] = [:]
-        for asset in assets where scan.undated[asset] != nil {
+        // Photos dated here too: their dates show how reliable the people clues are.
+        let applied = appliedIDs
+        for asset in assets where scan.undated[asset] != nil || applied.contains(asset) {
             let hints = people(in: asset, clusters: clusters, tagged: tagged)
             if !hints.isEmpty { out[asset] = hints }
         }
@@ -1142,10 +1167,16 @@ final class AppState {
         isImportingPeople = true
         if !quietly { rememberLibrary(libraryURL) }
         let undated = Set(scan.undated.keys)
+        // Faces in photos dated here too, so the age-group clues can be checked against those dates.
+        // Photos dated by guessing (here or not at all) are never used as dated references.
+        let notReferences = undated.union(appliedIDs)
+        var faceIDs = notReferences
+        // And dated photos of people with a birth year, to check the face-age model against.
+        faceIDs.formUnion(faceAgeReferenceIDs())
         Task.detached(priority: .userInitiated) {
             let scoped = libraryURL.startAccessingSecurityScopedResource()
             defer { if scoped { libraryURL.stopAccessingSecurityScopedResource() } }
-            let result = Result { try PhotosPeopleReader.read(libraryURL: libraryURL, facesFor: undated) }
+            let result = Result { try PhotosPeopleReader.read(libraryURL: libraryURL, facesFor: faceIDs, undated: notReferences) }
             let cameras = (try? PhotosPeopleReader.readCameras(libraryURL: libraryURL)) ?? [:]
             await MainActor.run {
                 self.isImportingPeople = false
@@ -1451,6 +1482,7 @@ final class AppState {
         store.save(analyses, to: "analyses")
         store.save(decisions, to: "decisions")
         places.saveNow()
+        store.save(faceAges, to: "faceAges")
         store.flush()
     }
 }

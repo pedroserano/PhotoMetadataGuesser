@@ -12,6 +12,7 @@ final class SetDateTests: XCTestCase {
 
     func testOneDateForManyPhotos() {
         let state = AppState()
+        state.decisions = [:]   // other tests in this run share the data folder
         state.setMonth("a", 3)           // had its own month
         state.setOverride("b", year: 1970, season: .fall)
         state.setIgnored("c", true)       // hidden photos are left alone

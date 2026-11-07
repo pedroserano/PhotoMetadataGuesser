@@ -117,6 +117,9 @@ public struct DateEvidence: Codable, Hashable, Identifiable, Sendable {
     public var seasonWeight: Double
     public var exactMonth: Int?
     public var exactDay: Int?
+    /// Which kind of clue this is for `ClueCalibration`, when the summary differs from photo to photo
+    /// (e.g. a face age group, whatever the person's name).
+    public var calibrationKey: String? = nil
 
     public init(
         id: UUID = UUID(),

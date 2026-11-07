@@ -83,7 +83,8 @@ enum PhotosPeopleReader {
 
     /// Named people and their photos, every detected face in the photos listed in `facesFor`, and
     /// dated photos of the same face groups (up to `referencesPerGroup` per group, biggest faces first).
-    static func read(libraryURL: URL, facesFor assetIDs: Set<String> = [], referencesPerGroup: Int = 300) throws
+    /// - Parameter undated: photos never used as dated references (defaults to `assetIDs`).
+    static func read(libraryURL: URL, facesFor assetIDs: Set<String> = [], undated: Set<String>? = nil, referencesPerGroup: Int = 300) throws
         -> (people: [TaggedPerson], faces: [String: [DetectedFace]], references: [String: ReferenceCandidate]) {
         let handle = try open(libraryURL)
         defer { sqlite3_close(handle) }
@@ -91,7 +92,7 @@ enum PhotosPeopleReader {
         let faces = assetIDs.isEmpty ? [:] : try readFaces(handle, for: assetIDs)
         let clusters = Set(faces.values.flatMap { $0.compactMap(\.clusterID) })
         let references = clusters.isEmpty ? [:]
-            : (try? readReferences(handle, clusters: clusters, excluding: assetIDs, perGroup: referencesPerGroup)) ?? [:]
+            : (try? readReferences(handle, clusters: clusters, excluding: undated ?? assetIDs, perGroup: referencesPerGroup)) ?? [:]
         return (people, faces, references)
     }
 

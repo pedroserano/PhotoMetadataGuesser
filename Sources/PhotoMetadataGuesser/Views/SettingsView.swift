@@ -43,6 +43,8 @@ struct GeneralSettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
+            FaceAgeModelSection()
+
             Section("Dates") {
                 HStack {
                     Text("No photos before")
@@ -85,6 +87,57 @@ struct GeneralSettingsView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("Your groups, people and history are kept. Guesses are made again in the background.")
+        }
+    }
+}
+
+/// The optional face-age model: how old named people look, combined with their birth years.
+struct FaceAgeModelSection: View {
+    @Environment(AppState.self) private var state
+    @State private var installed = FaceAgeEstimator.isInstalled
+    @State private var problem: String?
+
+    var body: some View {
+        Section("Face Age Model") {
+            HStack {
+                Label(installed ? "Installed" : "Not installed", systemImage: installed ? "checkmark.circle.fill" : "circle.dashed")
+                    .foregroundStyle(installed ? .green : .secondary)
+                Spacer()
+                Button(installed ? "Replace…" : "Choose Model…") { choose() }
+                if installed {
+                    Button("Remove", role: .destructive) {
+                        FaceAgeEstimator.remove()
+                        installed = false
+                        state.recomputeEstimates()
+                    }
+                }
+            }
+            if installed {
+                let readings = state.faceAges.values.reduce(0) { $0 + $1.values.filter { $0 >= 0 }.count }
+                Text("Read \(readings.formatted()) faces of people with a birth year so far.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            if let problem { Text(problem).font(.caption).foregroundStyle(.red) }
+            Text("A Core ML model (.mlpackage or .mlmodel) that takes a 384×384 “face” image and gives an “age” estimates how old each named person looks. With their birth year that dates the photo, and several people in one photo are combined. It runs on this Mac only. Age models are usually licensed for non-commercial use only, so none comes with the app.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func choose() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.init(filenameExtension: "mlmodel")!, .init(filenameExtension: "mlpackage")!]
+        panel.treatsFilePackagesAsDirectories = false
+        panel.message = "Choose a face-age Core ML model"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try FaceAgeEstimator.install(from: url)
+            installed = true
+            problem = nil
+            state.startFaceAges()
+        } catch {
+            problem = error.localizedDescription
+            installed = FaceAgeEstimator.isInstalled
         }
     }
 }

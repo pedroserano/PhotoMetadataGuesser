@@ -126,6 +126,47 @@ final class ClueCalibrationTests: XCTestCase {
 
         let prints = store.loadBinary([String: Data].self, from: "featurePrints") ?? [:]
         let references = store.load([String: ReferenceCandidate].self, from: "referenceCandidates") ?? [:]
+        // Who's in each photo, the way the app works it out: Photos' face groups linked to people.
+        let people = store.load([PersonInfo].self, from: "people") ?? []
+        let faces = store.load([String: [DetectedFace]].self, from: "detectedFaces") ?? [:]
+        let tagged = store.load([TaggedPerson].self, from: "taggedPeople") ?? []
+        var clusterPerson: [String: UUID] = [:]
+        for p in people { if let c = p.photosPersonID { clusterPerson[c] = p.id } }
+        var hints: [String: [GroupPersonHint]] = [:]
+        for (asset, list) in faces {
+            for f in list { if let c = f.clusterID, let id = clusterPerson[c] { hints[asset, default: []].append(GroupPersonHint(personID: id, fromPhotos: true, faceAgeType: f.ageType)) } }
+        }
+        for t in tagged {
+            guard let id = clusterPerson[t.id] else { continue }
+            for a in t.assetIDs where faces[a] == nil { hints[a, default: []].append(GroupPersonHint(personID: id, fromPhotos: true)) }
+        }
+        func peopleClues(_ id: String) -> [DateEvidence] { GroupClues.peopleEvidence(hints[id] ?? [], people: people) }
+        // The face-age model's readings, and its correction learned from faces in trusted-date photos.
+        let faceAges = store.load([String: [String: Double]].self, from: "faceAges") ?? [:]
+        let bornPeople = Dictionary(people.filter { $0.birthYear != nil }.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        var readings: [String: [FaceAgeClues.Reading]] = [:]
+        var pairs: [(read: Double, real: Double)] = []
+        for (asset, ages) in faceAges {
+            for (cluster, age) in ages where age >= 0 {
+                guard let id = clusterPerson[cluster], let person = bornPeople[id] else { continue }
+                readings[asset, default: []].append(.init(personID: id, age: age))
+                if let c = references[asset] {
+                    let real = Double(c.year) + (Double(c.month) - 0.5) / 12 - (Double(person.birthYear!) + (Double(person.birthMonth ?? 7) - 0.5) / 12)
+                    if real >= 0 { pairs.append((age, real)) }
+                }
+            }
+        }
+        let correction = FaceAgeClues.Correction.learn(pairs)
+        print("FACE CORRECTION from \(pairs.count) faces:", correction.brackets.map { "<\($0.below): bias \(String(format: "%.1f", $0.bias)) spread \(String(format: "%.1f", $0.spread)) n=\($0.checked)" })
+        var withFaceModel = 0
+        func faceModelClues(_ id: String) -> [DateEvidence] {
+            var clues = peopleClues(id)
+            if let r = readings[id], let e = FaceAgeClues.evidence(r, people: people, correction: correction) {
+                clues.removeAll { $0.calibrationKey?.hasPrefix("person:faceAge:") == true }
+                clues.append(e)
+            }
+            return clues
+        }
 
         // Folds by Apply click, so photos dated together (often one event) never train each other.
         var seen = Set<String>()
@@ -155,7 +196,8 @@ final class ClueCalibrationTests: XCTestCase {
         }
         let probeWeights: [Double] = [AppState.lookalikeWeight]
         var withLookalike = 0, onlyLimits = 0
-        let arms = ["before", "now"] + probeWeights.map { "look-alikes \($0)" }
+        let arms = ["before", "now"] + probeWeights.map { "look-alikes \($0)" } + ["people", "people calibrated", "face model"]
+        var withPeople = 0
         var all: [String: Score] = [:], own: [String: Score] = [:]
         let referenceExamples = references.compactMap { id, c in
             prints[id].map { YearProbe.Example(id: id, year: c.year, print: EventLinks.unpack($0)) }
@@ -163,7 +205,7 @@ final class ClueCalibrationTests: XCTestCase {
         for fold in 0..<5 {
             let train = truth.filter { $0.fold != fold }, test = truth.filter { $0.fold == fold }
             guard !test.isEmpty else { continue }
-            let calibration = ClueCalibration.build(train.map { .init(evidence: clues($0.id), year: $0.year, month: $0.month) })
+            let calibration = ClueCalibration.build(train.map { .init(evidence: clues($0.id) + faceModelClues($0.id), year: $0.year, month: $0.month) })
             let testIDs = Set(test.map(\.id))
             let probe = YearProbe(referenceExamples.filter { !testIDs.contains($0.id) }
                                   + train.compactMap { t in prints[t.id].map { .init(id: t.id, year: t.year, print: EventLinks.unpack($0)) } })
@@ -176,6 +218,13 @@ final class ClueCalibrationTests: XCTestCase {
                                  EvidenceFusion.estimate(from: now, options: options)]
                 if probeClues[0][t.id] != nil { withLookalike += 1 }
                 for c in probeClues { estimates.append(EvidenceFusion.estimate(from: now + (c[t.id].map { [$0] } ?? []), options: options)) }
+                let base = now + (probeClues[0][t.id].map { [$0] } ?? [])
+                let who = peopleClues(t.id)
+                if !who.isEmpty { withPeople += 1 }
+                estimates.append(EvidenceFusion.estimate(from: base + who, options: options))
+                estimates.append(EvidenceFusion.estimate(from: base + who.map(calibration.adjusted), options: options))
+                if readings[t.id] != nil { withFaceModel += 1 }
+                estimates.append(EvidenceFusion.estimate(from: base + faceModelClues(t.id).map(calibration.adjusted), options: options))
                 if estimates.last!.onlyLimits || !estimates.last!.hasAnyEvidence { onlyLimits += 1 }
                 for (arm, est) in zip(arms, estimates) {
                     add(&all[arm, default: Score()], est, t)
@@ -189,8 +238,43 @@ final class ClueCalibrationTests: XCTestCase {
         }
         let report = (arms.map { line($0, all[$0] ?? Score()) } + arms.map { line($0 + " (year you typed)", own[$0] ?? Score()) })
             .joined(separator: "\n")
-            + "\nlook-alike clue on \(withLookalike) of \(truth.count); still no real clue: \(onlyLimits)"
+            + "\nlook-alike clue on \(withLookalike) of \(truth.count); people clues on \(withPeople); face model on \(withFaceModel); still no real clue: \(onlyLimits)"
         print("BACKTEST\n" + report)
         try report.write(toFile: dir + "/backtest.txt", atomically: true, encoding: .utf8)
+    }
+}
+
+/// People clues: face age groups are checked per age group, pooled across people; the birth-year limit isn't.
+final class PeopleCalibrationTests: XCTestCase {
+    func testBabyCluesThatAreUsuallyWrongCountLess() {
+        let people = (0..<25).map { PersonInfo(name: "Kid \($0)", birthYear: 1980 + $0 % 10) }
+        // Every "baby" clue was wrong: the photos are from 15 years after each birth.
+        let confirmed = people.map { p in
+            ClueCalibration.Confirmed(evidence: [PeopleClues.faceAgeGroup(of: p, type: 1)!, PeopleClues.presence(of: p)!],
+                                      year: p.birthYear! + 15, month: 6)
+        }
+        let calibration = ClueCalibration.build(confirmed)
+        XCTAssertEqual(calibration.year.keys.sorted(), ["person:faceAge:1"], "pooled, and the birth-year limit isn't calibrated")
+        let someoneElse = PersonInfo(name: "New", birthYear: 2000)
+        let adjusted = calibration.adjusted(PeopleClues.faceAgeGroup(of: someoneElse, type: 1)!)
+        XCTAssertLessThan(adjusted.weight, 0.25, "from 0.75")
+        let limit = calibration.adjusted(PeopleClues.presence(of: someoneElse)!)
+        XCTAssertTrue(limit.isHardConstraint)
+        XCTAssertEqual(limit.yearLow, 2000)
+    }
+
+    func testVagueAgeGroupsAreLeftOut() {
+        let p = PersonInfo(name: "P", birthYear: 1984)
+        XCTAssertNil(PeopleClues.faceAgeGroup(of: p, type: 3))
+        XCTAssertNil(PeopleClues.faceAgeGroup(of: p, type: 5))
+    }
+
+    func testBirthYearsHelpCountsEachPhotoOnce() {
+        let a = PersonInfo(name: "A", birthYear: 1980), b = PersonInfo(name: "B", birthYear: nil), c = PersonInfo(name: "C", birthYear: nil)
+        let byPerson: [UUID: Set<String>] = [a.id: ["1", "2"], b.id: ["2", "3", "4"], c.id: ["4"]]
+        let helped = PeopleView.helped(people: [a, b, c], undatedByPerson: byPerson, top: 1)
+        XCTAssertEqual(helped.now, 2)
+        XCTAssertEqual(helped.more, 2, "photo 2 is already helped")
+        XCTAssertEqual(helped.top, 1)
     }
 }

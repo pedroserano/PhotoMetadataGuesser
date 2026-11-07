@@ -93,13 +93,43 @@ struct PeopleView: View {
     }
 
     private func summary(_ counts: [UUID: Counts]) -> some View {
+        let helped = Self.helped(people: state.people, undatedByPerson: undatedByPerson)
         let withYear = state.people.filter { $0.birthYear != nil }.count
-        let waiting = state.people.filter { $0.birthYear == nil }.reduce(0) { $0 + (counts[$1.id]?.undated ?? 0) }
-        return Text("\(state.people.count) people · \(withYear) with a birth year"
-                    + (waiting > 0 ? " · the missing ones could help date up to \(waiting.formatted()) photos" : ""))
+        var text = "\(state.people.count) people · \(withYear) with a birth year · birth years help date \(helped.now.formatted()) of \(state.scan.undated.count.formatted()) undated photos"
+        if helped.more > 0 {
+            text += " · adding the top \(helped.top) missing would help \(helped.more.formatted()) more"
+        }
+        return Text(text)
             .font(.callout)
             .foregroundStyle(.secondary)
             .lineLimit(1)
+            .help(text)
+    }
+
+    /// Each person's undated photos (tags from Photos plus photos the user marked).
+    private var undatedByPerson: [UUID: Set<String>] {
+        var out: [UUID: Set<String>] = [:]
+        for (id, assets) in state.taggedAssetsByPerson {
+            out[id] = assets.filter { state.scan.undated[$0] != nil }
+        }
+        for (asset, hints) in state.photoPeople where state.scan.undated[asset] != nil {
+            for h in hints { out[h.personID, default: []].insert(asset) }
+        }
+        return out
+    }
+
+    /// Undated photos a birth year already helps (each counted once), and how many more the `top`
+    /// people without one would add.
+    static func helped(people: [PersonInfo], undatedByPerson: [UUID: Set<String>], top: Int = 5)
+        -> (now: Int, more: Int, top: Int) {
+        var covered = Set<String>()
+        for p in people where p.birthYear != nil { covered.formUnion(undatedByPerson[p.id] ?? []) }
+        let missing = people.filter { $0.birthYear == nil }
+            .map { undatedByPerson[$0.id] ?? [] }
+            .sorted { $0.subtracting(covered).count > $1.subtracting(covered).count }
+            .prefix(top)
+        let more = missing.reduce(into: Set<String>()) { $0.formUnion($1) }.subtracting(covered).count
+        return (covered.count, more, min(top, missing.count))
     }
 
     /// Tagged and undated photo counts per person (tags from Photos plus photos the user marked).

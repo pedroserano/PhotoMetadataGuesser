@@ -201,11 +201,12 @@ final class PhotoLibraryService: @unchecked Sendable {
     func cancel(_ id: PHImageRequestID) { imageManager.cancelImageRequest(id) }
 
     /// A good-quality rendering for analysis (current edited version, oriented correctly).
-    func analysisImage(for asset: PHAsset, maxEdge: Int) async -> CGImage? {
+    /// - Parameter allowNetwork: false uses only what's on this Mac (nil if the photo is only in iCloud).
+    func analysisImage(for asset: PHAsset, maxEdge: Int, allowNetwork: Bool = true) async -> CGImage? {
         let options = PHImageRequestOptions()
         options.deliveryMode = .highQualityFormat
         options.resizeMode = .exact
-        options.isNetworkAccessAllowed = true
+        options.isNetworkAccessAllowed = allowNetwork
         options.isSynchronous = false
         let size = CGSize(width: maxEdge, height: maxEdge)
         return await withCheckedContinuation { continuation in

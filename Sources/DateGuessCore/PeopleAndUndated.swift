@@ -23,14 +23,19 @@ public enum PeopleClues {
         switch type {
         case 1: (lo, hi, weight, label) = (0, 1, 0.75, "looks like a baby")
         case 2: (lo, hi, weight, label) = (1, 6, 0.6, "looks like a young child")
-        case 3: (lo, hi, weight, label) = (4, nil, 0.3, "looks older than a young child")
-        case 5: (lo, hi, weight, label) = (25, nil, 0.2, "looks like an adult")
+        // 3 (older child or adult) and 5 (adult) only say "after some year". As a weighted clue that
+        // pulled guesses toward that year: on this library "Peter looks older than a young child →
+        // 1988 or later" moved 2019 photos to 2002. The birth year already sets the limit, so they're
+        // left out.
         default: return nil
         }
         let range = hi.map { "\(born + lo)–\(born + $0)" } ?? "\(born + lo) or later"
-        return DateEvidence(source: .person,
-                            summary: "Photos thinks \(person.name) \(label) here (born \(born)) → \(range)",
-                            yearLow: born + lo, yearHigh: hi.map { born + $0 }, weight: weight)
+        var e = DateEvidence(source: .person,
+                             summary: "Photos thinks \(person.name) \(label) here (born \(born)) → \(range)",
+                             yearLow: born + lo, yearHigh: hi.map { born + $0 }, weight: weight)
+        // Checked against the user's dated photos per age group, pooled across people.
+        e.calibrationKey = "person:faceAge:\(type)"
+        return e
     }
 
     /// Apparent age → year range. `matchConfidence` is how sure we are it's really them.
